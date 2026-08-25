@@ -85,7 +85,6 @@ bmf:
     enabled: false
     namespace: "hardware-inventory"
     hostClass: "metal3"
-    networkClass: "metal3"
 
 validation:
   enabled: true

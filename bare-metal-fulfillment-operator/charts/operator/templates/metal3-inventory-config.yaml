@@ -1,4 +1,7 @@
 {{- if .Values.metal3.enabled }}
+{{- if and .Values.bcm.enabled .Values.metal3.enabled }}
+{{- fail "bcm.enabled and metal3.enabled are mutually exclusive" }}
+{{- end }}
 {{- if not .Values.metal3.namespace }}
 {{- fail "metal3.enabled is true but metal3.namespace is not set" }}
 {{- end }}
@@ -14,9 +17,8 @@ stringData:
   inventory.yaml: |
     name: metal3-inventory
     type: metal3
-    hostClass: {{ .Values.metal3.hostClass }}
-    networkClass: {{ .Values.metal3.networkClass }}
+    hostClass: {{ .Values.metal3.hostClass | quote }}
     options:
       metal3:
-        namespace: {{ .Values.metal3.namespace }}
+        namespace: {{ .Values.metal3.namespace | quote }}
 {{- end }}

@@ -302,7 +302,6 @@ bmf:
     enabled: false
     namespace: ""
     hostClass: "metal3"
-    networkClass: "metal3"
 
 # --- Validation hooks ---
 validation:

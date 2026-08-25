@@ -1407,11 +1407,6 @@
               "type": "string",
               "description": "Host class identifier for Metal3 inventory",
               "default": "metal3"
-            },
-            "networkClass": {
-              "type": "string",
-              "description": "Network class identifier for Metal3 inventory",
-              "default": "metal3"
             }
           }
         }

@@ -337,7 +337,8 @@ bmf:
 # When enabled, the chart creates osac-inventory-config and osac-management-config
 # Secrets with Metal3 backend type. The BMF operator mounts these at
 # /etc/osac/inventory/inventory.yaml and /etc/osac/management/management.yaml.
-bmf:
+# NOTE: metal3 nests under the same top-level bmf: key as bcm above — bcm and
+# metal3 are mutually exclusive backends, not separate bmf: blocks.
   metal3:
     # Set to true to create Metal3 config secrets via Helm.
     # When false (default), secrets must be created manually.
@@ -348,8 +349,6 @@ bmf:
     namespace: ""
     # Host class identifier written to the inventory config.
     hostClass: "metal3"
-    # Network class identifier written to the inventory config.
-    networkClass: "metal3"
 
 # ---------------------
 # Bundled PostgreSQL (dev/test)
