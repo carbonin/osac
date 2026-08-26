@@ -63,13 +63,25 @@ func createMetal3BMH(name string, labels map[string]string, opStatus metal3api.O
 
 	// Status is a subresource — Create does not persist it. Re-set and update
 	// separately so envtest stores the desired operational/provisioning state.
-	// HardwareDetails is required so FindFreeHost does not skip this host.
 	bmh.Status.OperationalStatus = opStatus
 	bmh.Status.Provisioning.State = provState
-	bmh.Status.HardwareDetails = &metal3api.HardwareDetails{
-		NIC: []metal3api.NIC{{MAC: "aa:bb:cc:dd:ee:01"}},
-	}
 	ExpectWithOffset(1, k8sClient.Status().Update(ctx, bmh)).To(Succeed())
+
+	// NIC inventory is sourced from the companion HardwareData resource (same
+	// name/namespace as the BMH), so create it — without NIC data FindFreeHost
+	// skips the host.
+	hd := &metal3api.HardwareData{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: metal3TestNS,
+		},
+		Spec: metal3api.HardwareDataSpec{
+			HardwareDetails: &metal3api.HardwareDetails{
+				NIC: []metal3api.NIC{{MAC: "aa:bb:cc:dd:ee:01"}},
+			},
+		},
+	}
+	ExpectWithOffset(1, k8sClient.Create(ctx, hd)).To(Succeed())
 	return bmh
 }
 
@@ -102,7 +114,12 @@ func getBMH(name string) *metal3api.BareMetalHost { return getBMHInNS(metal3Test
 
 func cleanupBMI(name string) { cleanupBMIInNS(metal3TestNS, name) }
 
-func cleanupBMH(name string) { cleanupBMHInNS(metal3TestNS, name) }
+func cleanupBMH(name string) {
+	hd := &metal3api.HardwareData{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: metal3TestNS}}
+	ExpectWithOffset(1, client.IgnoreNotFound(k8sClient.Delete(ctx, hd))).NotTo(HaveOccurred())
+
+	cleanupBMHInNS(metal3TestNS, name)
+}
 
 var _ = Describe("BareMetalInstance Metal3 Integration", func() {
 	var ns *corev1.Namespace
