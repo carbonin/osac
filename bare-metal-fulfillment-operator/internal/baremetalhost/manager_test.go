@@ -185,6 +185,88 @@ var _ = Describe("BareMetalHost Manager", func() {
 		})
 	})
 
+	Describe("GetHardwareNICs", func() {
+		bmhWithStatus := func(name string, nics ...metal3api.NIC) *metal3api.BareMetalHost {
+			bmh := &metal3api.BareMetalHost{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+			}
+			if len(nics) > 0 {
+				bmh.Status.HardwareDetails = &metal3api.HardwareDetails{NIC: nics}
+			}
+			return bmh
+		}
+		hardwareData := func(name string, nics ...metal3api.NIC) *metal3api.HardwareData {
+			return &metal3api.HardwareData{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+				Spec: metal3api.HardwareDataSpec{
+					HardwareDetails: &metal3api.HardwareDetails{NIC: nics},
+				},
+			}
+		}
+
+		It("returns lowercased MACs from HardwareData when present", func() {
+			mgr := newTestManager(
+				bmhWithStatus("node001"),
+				hardwareData("node001", metal3api.NIC{MAC: "AA:BB:CC:DD:EE:01"}, metal3api.NIC{MAC: "ff:00:11:22:33:44"}),
+			)
+
+			macs, err := mgr.GetHardwareNICs(ctx, "node001")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(macs).To(Equal([]string{"aa:bb:cc:dd:ee:01", "ff:00:11:22:33:44"}))
+		})
+
+		It("falls back to Status.HardwareDetails when HardwareData is absent", func() {
+			mgr := newTestManager(
+				bmhWithStatus("node001", metal3api.NIC{MAC: "AA:BB:CC:DD:EE:01"}),
+			)
+
+			macs, err := mgr.GetHardwareNICs(ctx, "node001")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(macs).To(Equal([]string{"aa:bb:cc:dd:ee:01"}))
+		})
+
+		It("prefers HardwareData over Status.HardwareDetails when both are populated", func() {
+			mgr := newTestManager(
+				bmhWithStatus("node001", metal3api.NIC{MAC: "11:22:33:44:55:66"}),
+				hardwareData("node001", metal3api.NIC{MAC: "AA:BB:CC:DD:EE:01"}),
+			)
+
+			macs, err := mgr.GetHardwareNICs(ctx, "node001")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(macs).To(Equal([]string{"aa:bb:cc:dd:ee:01"}))
+		})
+
+		It("returns nil without error when neither source has NICs", func() {
+			mgr := newTestManager(bmhWithStatus("node001"))
+
+			macs, err := mgr.GetHardwareNICs(ctx, "node001")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(macs).To(BeNil())
+		})
+
+		It("skips empty MAC entries", func() {
+			mgr := newTestManager(
+				bmhWithStatus("node001"),
+				hardwareData("node001",
+					metal3api.NIC{MAC: "AA:BB:CC:DD:EE:01"},
+					metal3api.NIC{MAC: ""},
+					metal3api.NIC{MAC: "FF:00:11:22:33:44"},
+				),
+			)
+
+			macs, err := mgr.GetHardwareNICs(ctx, "node001")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(macs).To(Equal([]string{"aa:bb:cc:dd:ee:01", "ff:00:11:22:33:44"}))
+		})
+
+		It("returns an error when the BareMetalHost is not found", func() {
+			mgr := newTestManager()
+
+			_, err := mgr.GetHardwareNICs(ctx, "nonexistent")
+			Expect(err).To(HaveOccurred())
+		})
+	})
+
 	Describe("IsBMHReady", func() {
 		It("should return true when available and OK", func() {
 			bmh := &metal3api.BareMetalHost{

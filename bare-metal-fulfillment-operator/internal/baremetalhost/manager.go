@@ -251,32 +251,52 @@ func (m *Manager) DeleteBMH(ctx context.Context, name string) error {
 	return nil
 }
 
-// GetHardwareNICs returns the lowercased MAC addresses from the BareMetalHost
-// status.hardware.nics (Metal3 hardware inspection data). Returns nil when
-// the BMH has no hardware details or no NICs recorded.
+// GetHardwareNICs returns the lowercased MAC addresses for the host's NICs,
+// sourcing them from the standalone HardwareData resource and falling back to
+// the deprecated BareMetalHost.Status.HardwareDetails. Returns nil when neither
+// source has NIC data.
 func (m *Manager) GetHardwareNICs(ctx context.Context, name string) ([]string, error) {
 	log := ctrllog.FromContext(ctx)
 
+	key := client.ObjectKey{Namespace: m.namespace, Name: name}
+
 	bmh := &metal3api.BareMetalHost{}
-	if err := m.client.Get(ctx, client.ObjectKey{Namespace: m.namespace, Name: name}, bmh); err != nil {
+	if err := m.client.Get(ctx, key, bmh); err != nil {
 		return nil, fmt.Errorf("failed to get BareMetalHost %s/%s: %w", m.namespace, name, err)
 	}
-	if bmh.Status.HardwareDetails == nil || len(bmh.Status.HardwareDetails.NIC) == 0 {
+
+	hd := &metal3api.HardwareData{}
+	if err := m.client.Get(ctx, key, hd); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("failed to get HardwareData %s/%s: %w", m.namespace, name, err)
+		}
+		hd = nil
+	}
+
+	macs := managerHardwareMACs(ResolveHardwareDetails(hd, bmh))
+	if len(macs) == 0 {
 		log.V(1).Info("BareMetalHost has no hardware NIC data",
 			"name", name, "namespace", m.namespace)
 		return nil, nil
 	}
-	macs := make([]string, 0, len(bmh.Status.HardwareDetails.NIC))
-	for _, nic := range bmh.Status.HardwareDetails.NIC {
+
+	log.V(1).Info("Retrieved hardware NICs",
+		"name", name, "namespace", m.namespace, "count", len(macs))
+	return macs, nil
+}
+
+func managerHardwareMACs(details *metal3api.HardwareDetails) []string {
+	if details == nil || len(details.NIC) == 0 {
+		return nil
+	}
+	macs := make([]string, 0, len(details.NIC))
+	for _, nic := range details.NIC {
 		if nic.MAC == "" {
 			continue
 		}
 		macs = append(macs, strings.ToLower(nic.MAC))
 	}
-
-	log.V(1).Info("Retrieved hardware NICs from BareMetalHost",
-		"name", name, "namespace", m.namespace, "count", len(macs))
-	return macs, nil
+	return macs
 }
 
 // IsBMHReady checks whether the BMH has completed Metal3 registration and is
