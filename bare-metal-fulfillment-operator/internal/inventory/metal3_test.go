@@ -71,6 +71,7 @@ type bmhBuilder struct {
 	opStatus           metal3api.OperationalStatus
 	provState          metal3api.ProvisioningState
 	consumerRef        *corev1.ObjectReference
+	inspectionMode     metal3api.InspectionMode
 	nics               []metal3api.NIC
 	hasHardwareDetails bool
 }
@@ -109,6 +110,11 @@ func (b *bmhBuilder) WithConsumerRef(ref *corev1.ObjectReference) *bmhBuilder {
 	return b
 }
 
+func (b *bmhBuilder) WithInspectionMode(mode metal3api.InspectionMode) *bmhBuilder {
+	b.inspectionMode = mode
+	return b
+}
+
 func (b *bmhBuilder) WithNICs(nics ...metal3api.NIC) *bmhBuilder {
 	b.hasHardwareDetails = true
 	b.nics = nics
@@ -128,7 +134,8 @@ func (b *bmhBuilder) Build() *metal3api.BareMetalHost {
 			Annotations: b.annotations,
 		},
 		Spec: metal3api.BareMetalHostSpec{
-			ConsumerRef: b.consumerRef,
+			ConsumerRef:    b.consumerRef,
+			InspectionMode: b.inspectionMode,
 		},
 		Status: metal3api.BareMetalHostStatus{
 			OperationalStatus: b.opStatus,
@@ -407,6 +414,22 @@ func TestFindFreeHost(t *testing.T) {
 		}
 		if host != nil {
 			t.Errorf("expected nil (inspection disabled), got %+v", host)
+		}
+	})
+
+	t.Run("skips host with InspectionMode disabled field", func(t *testing.T) {
+		bmh := newBMHBuilder("host-inspect-mode-disabled").
+			WithInspectionMode(metal3api.InspectionModeDisabled).
+			WithNICs(testNIC("AA:BB:CC:DD:EE:01")).
+			Build()
+
+		m := newMetal3ClientForTest(bmh)
+		host, err := m.FindFreeHost(ctx, map[string]string{"hostType": "gpu-node"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if host != nil {
+			t.Errorf("expected nil (InspectionMode disabled), got %+v", host)
 		}
 	})
 
