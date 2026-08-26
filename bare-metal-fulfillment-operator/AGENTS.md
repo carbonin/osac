@@ -150,5 +150,5 @@ CRDs must stay in sync: after `make manifests`, run `make helm-crds` (uses `hack
 - `internal/controller/*_integration_test.go` — Metal3 integration tests
 - `test/integration/` — integration tests against a pre-existing, persistent Kind cluster (named `osac-dev`)
 - `test/utils/` — test utilities
-- `test/crds/` — external CRDs (metal3.io_baremetalhosts.yaml)
+- `test/crds/` — external CRDs (metal3.io_baremetalhosts.yaml, metal3.io_hardwaredata.yaml)
 - **ENVTEST_K8S_VERSION**: Auto-detected from k8s.io/api version in go.mod (e.g., 1.36)

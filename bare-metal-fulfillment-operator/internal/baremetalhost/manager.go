@@ -273,7 +273,7 @@ func (m *Manager) GetHardwareNICs(ctx context.Context, name string) ([]string, e
 		hd = nil
 	}
 
-	macs := managerHardwareMACs(ResolveHardwareDetails(hd, bmh))
+	macs := hardwareMACs(ResolveHardwareDetails(hd, bmh))
 	if len(macs) == 0 {
 		log.V(1).Info("BareMetalHost has no hardware NIC data",
 			"name", name, "namespace", m.namespace)
@@ -285,7 +285,7 @@ func (m *Manager) GetHardwareNICs(ctx context.Context, name string) ([]string, e
 	return macs, nil
 }
 
-func managerHardwareMACs(details *metal3api.HardwareDetails) []string {
+func hardwareMACs(details *metal3api.HardwareDetails) []string {
 	if details == nil || len(details.NIC) == 0 {
 		return nil
 	}

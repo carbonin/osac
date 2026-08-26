@@ -774,6 +774,29 @@ func TestGetHostNICs(t *testing.T) {
 		}
 	})
 
+	t.Run("skips NIC entries with empty MACs", func(t *testing.T) {
+		objs := newBMHBuilder("host-empty-macs").WithHardwareDataNICs(
+			testNIC("AA:BB:CC:DD:EE:01"),
+			testNIC(""),
+			testNIC("FF:00:11:22:33:44"),
+		).BuildObjects()
+
+		m := newMetal3ClientForTest(objs...)
+		nics, err := m.GetHostNICs(ctx, testNamespace+"/host-empty-macs")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		wantMACs := []string{"aa:bb:cc:dd:ee:01", "ff:00:11:22:33:44"}
+		if len(nics) != len(wantMACs) {
+			t.Fatalf("expected %d NICs (empty MAC skipped), got %d", len(wantMACs), len(nics))
+		}
+		for i, want := range wantMACs {
+			if nics[i].MAC != want {
+				t.Errorf("NIC[%d].MAC = %q, want %q", i, nics[i].MAC, want)
+			}
+		}
+	})
+
 	t.Run("returns error when neither source has NICs", func(t *testing.T) {
 		bmh := newBMHBuilder("host-no-hw").Build()
 

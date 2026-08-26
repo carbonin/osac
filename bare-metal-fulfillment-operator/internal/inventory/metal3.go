@@ -313,6 +313,9 @@ func metal3HostNICs(details *metal3api.HardwareDetails) []HostNIC {
 	}
 	nics := make([]HostNIC, 0, len(details.NIC))
 	for _, n := range details.NIC {
+		if n.MAC == "" {
+			continue
+		}
 		nics = append(nics, HostNIC{MAC: strings.ToLower(n.MAC)})
 	}
 	return nics
