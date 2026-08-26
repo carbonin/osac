@@ -25,6 +25,7 @@ import (
 
 	metal3api "github.com/metal3-io/baremetal-operator/apis/metal3.io/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/rest"
@@ -32,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/osac-project/osac/bare-metal-fulfillment-operator/internal/baremetalhost"
 	"github.com/osac-project/osac/bare-metal-fulfillment-operator/internal/shared"
 )
 
@@ -161,6 +163,15 @@ func (m *Metal3Client) FindFreeHost(ctx context.Context, matchExpressions map[st
 		return nil, fmt.Errorf("failed to list BareMetalHosts: %w", err)
 	}
 
+	hdList := &metal3api.HardwareDataList{}
+	if err := m.client.List(ctx, hdList, client.InNamespace(m.namespace)); err != nil {
+		return nil, fmt.Errorf("failed to list HardwareData: %w", err)
+	}
+	hardwareDataByName := make(map[string]*metal3api.HardwareData, len(hdList.Items))
+	for i := range hdList.Items {
+		hardwareDataByName[hdList.Items[i].Name] = &hdList.Items[i]
+	}
+
 	candidates := make([]metal3api.BareMetalHost, 0, len(bmhList.Items))
 	for _, bmh := range bmhList.Items {
 		if bmh.Status.OperationalStatus != metal3api.OperationalStatusOK {
@@ -180,7 +191,8 @@ func (m *Metal3Client) FindFreeHost(ctx context.Context, matchExpressions map[st
 			continue
 		}
 
-		if bmh.Status.HardwareDetails == nil || len(bmh.Status.HardwareDetails.NIC) == 0 {
+		details := baremetalhost.ResolveHardwareDetails(hardwareDataByName[bmh.Name], &bmh)
+		if details == nil || len(details.NIC) == 0 {
 			log.Error(nil, "Skipping BareMetalHost: available but NIC inventory is missing — host may be misconfigured or inspection incomplete", "host", bmh.Name)
 			continue
 		}
@@ -269,20 +281,41 @@ func (m *Metal3Client) GetHostNICs(ctx context.Context, inventoryHostID string) 
 		return nil, err
 	}
 
+	key := client.ObjectKey{Namespace: namespace, Name: name}
+
+	hd := &metal3api.HardwareData{}
+	if err := m.client.Get(ctx, key, hd); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("failed to get HardwareData %s: %w", inventoryHostID, err)
+		}
+		hd = nil
+	}
+
+	if nics := metal3HostNICs(baremetalhost.ResolveHardwareDetails(hd, nil)); len(nics) > 0 {
+		return nics, nil
+	}
+
 	bmh := &metal3api.BareMetalHost{}
-	if err := m.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, bmh); err != nil {
+	if err := m.client.Get(ctx, key, bmh); err != nil {
 		return nil, fmt.Errorf("failed to get BareMetalHost %s: %w", inventoryHostID, err)
 	}
 
-	if bmh.Status.HardwareDetails == nil || len(bmh.Status.HardwareDetails.NIC) == 0 {
+	nics := metal3HostNICs(baremetalhost.ResolveHardwareDetails(hd, bmh))
+	if len(nics) == 0 {
 		return nil, fmt.Errorf("BareMetalHost %s has no NIC inventory despite being allocated", inventoryHostID)
 	}
+	return nics, nil
+}
 
-	nics := make([]HostNIC, 0, len(bmh.Status.HardwareDetails.NIC))
-	for _, n := range bmh.Status.HardwareDetails.NIC {
+func metal3HostNICs(details *metal3api.HardwareDetails) []HostNIC {
+	if details == nil || len(details.NIC) == 0 {
+		return nil
+	}
+	nics := make([]HostNIC, 0, len(details.NIC))
+	for _, n := range details.NIC {
 		nics = append(nics, HostNIC{MAC: strings.ToLower(n.MAC)})
 	}
-	return nics, nil
+	return nics
 }
 
 func (m *Metal3Client) UnassignHost(ctx context.Context, inventoryHostID string, labels []string) error {
