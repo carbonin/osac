@@ -259,6 +259,17 @@ var _ = Describe("BareMetalHost Manager", func() {
 			Expect(macs).To(Equal([]string{"aa:bb:cc:dd:ee:01", "ff:00:11:22:33:44"}))
 		})
 
+		It("falls back to Status.HardwareDetails when HardwareData NICs all have empty MACs", func() {
+			mgr := newTestManager(
+				bmhWithStatus("node001", metal3api.NIC{MAC: "AA:BB:CC:DD:EE:01"}),
+				hardwareData("node001", metal3api.NIC{MAC: ""}, metal3api.NIC{MAC: ""}),
+			)
+
+			macs, err := mgr.GetHardwareNICs(ctx, "node001")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(macs).To(Equal([]string{"aa:bb:cc:dd:ee:01"}))
+		})
+
 		It("returns an error when the BareMetalHost is not found", func() {
 			mgr := newTestManager()
 

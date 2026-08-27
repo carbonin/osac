@@ -68,6 +68,30 @@ var _ = Describe("ResolveHardwareDetails", func() {
 		Expect(details.NIC).To(ConsistOf(statusNIC))
 	})
 
+	It("falls back to the BMH status when HardwareData NICs all have empty MACs", func() {
+		hd := hdWithNICs(metal3api.NIC{MAC: ""}, metal3api.NIC{MAC: ""})
+		bmh := bmhWithStatusNICs(statusNIC)
+
+		details := ResolveHardwareDetails(hd, bmh)
+		Expect(details).To(Equal(bmh.Status.HardwareDetails))
+		Expect(details.NIC).To(ConsistOf(statusNIC))
+	})
+
+	It("prefers HardwareData when at least one NIC has a non-empty MAC", func() {
+		hd := hdWithNICs(metal3api.NIC{MAC: ""}, hdNIC)
+		bmh := bmhWithStatusNICs(statusNIC)
+
+		details := ResolveHardwareDetails(hd, bmh)
+		Expect(details).To(Equal(hd.Spec.HardwareDetails))
+	})
+
+	It("returns nil when HardwareData has only empty MACs and BMH has none", func() {
+		hd := hdWithNICs(metal3api.NIC{MAC: ""})
+		bmh := &metal3api.BareMetalHost{} // Status.HardwareDetails is nil
+
+		Expect(ResolveHardwareDetails(hd, bmh)).To(BeNil())
+	})
+
 	It("does not let an empty HardwareData shadow a populated status", func() {
 		hd := &metal3api.HardwareData{Spec: metal3api.HardwareDataSpec{}} // no HardwareDetails at all
 		bmh := bmhWithStatusNICs(statusNIC)

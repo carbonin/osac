@@ -839,6 +839,22 @@ func TestGetHostNICs(t *testing.T) {
 		}
 	})
 
+	t.Run("falls back to Status.HardwareDetails when HardwareData NICs all have empty MACs", func(t *testing.T) {
+		objs := newBMHBuilder("host-empty-mac-hd").
+			WithHardwareDataNICs(testNIC(""), testNIC("")).
+			WithStatusNICs(testNIC("AA:BB:CC:DD:EE:01")).
+			BuildObjects()
+
+		m := newMetal3ClientForTest(objs...)
+		nics, err := m.GetHostNICs(ctx, testNamespace+"/host-empty-mac-hd")
+		if err != nil {
+			t.Fatalf("unexpected error (all-empty-MAC HardwareData should fall back to status): %v", err)
+		}
+		if len(nics) != 1 || nics[0].MAC != "aa:bb:cc:dd:ee:01" {
+			t.Fatalf("expected status NIC aa:bb:cc:dd:ee:01, got %+v", nics)
+		}
+	})
+
 	t.Run("returns HardwareData NICs when both sources are populated", func(t *testing.T) {
 		objs := newBMHBuilder("host-both").
 			WithHardwareDataNICs(testNIC("AA:BB:CC:DD:EE:01")).
