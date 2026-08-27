@@ -26,6 +26,7 @@ import (
 	metal3api "github.com/metal3-io/baremetal-operator/apis/metal3.io/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/rest"
@@ -163,11 +164,18 @@ func (m *Metal3Client) FindFreeHost(ctx context.Context, matchExpressions map[st
 		return nil, fmt.Errorf("failed to list BareMetalHosts: %w", err)
 	}
 
+	// HardwareData is the preferred NIC-data source, but the CRD is absent on
+	// older Metal3 installs. Treat a missing CRD (NoMatchError) as "no
+	// HardwareData present" and fall back to BareMetalHost.Status.HardwareDetails
+	// via ResolveHardwareDetails below, rather than failing host selection.
+	hardwareDataByName := map[string]*metal3api.HardwareData{}
 	hdList := &metal3api.HardwareDataList{}
 	if err := m.client.List(ctx, hdList, client.InNamespace(m.namespace)); err != nil {
-		return nil, fmt.Errorf("failed to list HardwareData: %w", err)
+		if !meta.IsNoMatchError(err) {
+			return nil, fmt.Errorf("failed to list HardwareData: %w", err)
+		}
+		log.V(1).Info("HardwareData CRD not installed; falling back to BareMetalHost.Status.HardwareDetails")
 	}
-	hardwareDataByName := make(map[string]*metal3api.HardwareData, len(hdList.Items))
 	for i := range hdList.Items {
 		hardwareDataByName[hdList.Items[i].Name] = &hdList.Items[i]
 	}
@@ -283,16 +291,21 @@ func (m *Metal3Client) GetHostNICs(ctx context.Context, inventoryHostID string) 
 
 	key := client.ObjectKey{Namespace: namespace, Name: name}
 
+	// HardwareData is the preferred NIC-data source. A NotFound (no HardwareData
+	// for this host) or a NoMatchError (CRD absent on older Metal3) both mean we
+	// fall back to BareMetalHost.Status.HardwareDetails below.
 	hd := &metal3api.HardwareData{}
 	if err := m.client.Get(ctx, key, hd); err != nil {
-		if !apierrors.IsNotFound(err) {
+		if !apierrors.IsNotFound(err) && !meta.IsNoMatchError(err) {
 			return nil, fmt.Errorf("failed to get HardwareData %s: %w", inventoryHostID, err)
 		}
 		hd = nil
 	}
 
-	if nics := metal3HostNICs(baremetalhost.ResolveHardwareDetails(hd, nil)); len(nics) > 0 {
-		return nics, nil
+	if hd != nil {
+		if nics := metal3HostNICs(baremetalhost.ResolveHardwareDetails(hd, nil)); len(nics) > 0 {
+			return nics, nil
+		}
 	}
 
 	bmh := &metal3api.BareMetalHost{}

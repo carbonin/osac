@@ -22,10 +22,13 @@ import (
 
 	metal3api "github.com/metal3-io/baremetal-operator/apis/metal3.io/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 const (
@@ -45,6 +48,50 @@ func newMetal3ClientForTest(objects ...client.Object) *Metal3Client {
 		WithScheme(scheme).
 		WithObjects(objects...).
 		WithStatusSubresource(&metal3api.BareMetalHost{}).
+		Build()
+	return &Metal3Client{
+		client:    fakeClient,
+		namespace: testNamespace,
+		hostClass: testHostClass,
+	}
+}
+
+// newMetal3ClientNoHardwareDataCRD builds a client that behaves as if the
+// HardwareData CRD is not installed (older Metal3): any Get/List of a
+// HardwareData object returns a NoMatchError, while BareMetalHost operations
+// pass through to the underlying fake client. This exercises the fallback to
+// BareMetalHost.Status.HardwareDetails.
+func newMetal3ClientNoHardwareDataCRD(objects ...client.Object) *Metal3Client {
+	noMatch := &meta.NoKindMatchError{
+		GroupKind: schema.GroupKind{Group: "metal3.io", Kind: "HardwareData"},
+	}
+	isHardwareData := func(obj runtime.Object) bool {
+		switch obj.(type) {
+		case *metal3api.HardwareData, *metal3api.HardwareDataList:
+			return true
+		default:
+			return false
+		}
+	}
+	scheme := newTestScheme()
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(objects...).
+		WithStatusSubresource(&metal3api.BareMetalHost{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if isHardwareData(obj) {
+					return noMatch
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if isHardwareData(list) {
+					return noMatch
+				}
+				return c.List(ctx, list, opts...)
+			},
+		}).
 		Build()
 	return &Metal3Client{
 		client:    fakeClient,
@@ -459,6 +506,21 @@ func TestFindFreeHost(t *testing.T) {
 		}
 	})
 
+	t.Run("falls back to Status.HardwareDetails when HardwareData CRD is not installed", func(t *testing.T) {
+		bmh := newBMHBuilder("host-no-hd-crd").
+			WithStatusNICs(testNIC("AA:BB:CC:DD:EE:01")).
+			Build()
+
+		m := newMetal3ClientNoHardwareDataCRD(bmh)
+		host, err := m.FindFreeHost(ctx, map[string]string{"hostType": "gpu-node"})
+		if err != nil {
+			t.Fatalf("unexpected error (missing HardwareData CRD should not fail host selection): %v", err)
+		}
+		if host == nil {
+			t.Fatal("expected host from Status.HardwareDetails fallback, got nil")
+		}
+	})
+
 	t.Run("skips host with inspect.metal3.io disabled annotation", func(t *testing.T) {
 		objs := newBMHBuilder("host-inspect-disabled").
 			WithAnnotations(map[string]string{"inspect.metal3.io": "disabled"}).
@@ -743,6 +805,28 @@ func TestGetHostNICs(t *testing.T) {
 		nics, err := m.GetHostNICs(ctx, testNamespace+"/host-status-only")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
+		}
+		wantMACs := []string{"aa:bb:cc:dd:ee:01", "ff:00:11:22:33:44"}
+		if len(nics) != len(wantMACs) {
+			t.Fatalf("expected %d NICs, got %d", len(wantMACs), len(nics))
+		}
+		for i, want := range wantMACs {
+			if nics[i].MAC != want {
+				t.Errorf("NIC[%d].MAC = %q, want %q", i, nics[i].MAC, want)
+			}
+		}
+	})
+
+	t.Run("falls back to Status.HardwareDetails when HardwareData CRD is not installed", func(t *testing.T) {
+		bmh := newBMHBuilder("host-no-hd-crd").WithStatusNICs(
+			testNIC("AA:BB:CC:DD:EE:01"),
+			testNIC("FF:00:11:22:33:44"),
+		).Build()
+
+		m := newMetal3ClientNoHardwareDataCRD(bmh)
+		nics, err := m.GetHostNICs(ctx, testNamespace+"/host-no-hd-crd")
+		if err != nil {
+			t.Fatalf("unexpected error (missing HardwareData CRD should not fail NIC lookup): %v", err)
 		}
 		wantMACs := []string{"aa:bb:cc:dd:ee:01", "ff:00:11:22:33:44"}
 		if len(nics) != len(wantMACs) {
