@@ -17,18 +17,24 @@ limitations under the License.
 package controller
 
 import (
+	"context"
+	"fmt"
 	"path/filepath"
 
 	metal3api "github.com/metal3-io/baremetal-operator/apis/metal3.io/v1alpha1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
 	"github.com/osac-project/osac/bare-metal-fulfillment-operator/api/v1alpha1"
@@ -248,6 +254,93 @@ var _ = Describe("BareMetalInstance Metal3 Integration", func() {
 			Expect(condition).NotTo(BeNil())
 			Expect(condition.Status).To(Equal(metav1.ConditionTrue))
 			Expect(condition.Reason).To(Equal(v1alpha1.HostConditionReasonPowerOn))
+		})
+	})
+
+	Describe("Management finalizer conflict handling", func() {
+		const bmiName = "conflict-test-bmi"
+		const bmhName = "conflict-test-bmh"
+
+		AfterEach(func() {
+			cleanupBMI(bmiName)
+			cleanupBMH(bmhName)
+		})
+
+		// A conflict on the Update that adds the management finalizer is routine
+		// (concurrent modification / lagging cache read), not a real failure. It
+		// must requeue for retry, never mark the instance Failed — Failed is a
+		// no-requeue terminal state, so treating a transient conflict as Failed
+		// would permanently strand the instance.
+		It("should requeue without marking the instance Failed when the management finalizer add conflicts", func() {
+			createMetal3BMH(bmhName, map[string]string{
+				inventory.Metal3HostTypeLabel: "compute",
+			}, metal3api.OperationalStatusOK, metal3api.StateAvailable)
+
+			bmi := &v1alpha1.BareMetalInstance{
+				ObjectMeta: metav1.ObjectMeta{Name: bmiName, Namespace: metal3TestNS},
+				Spec: v1alpha1.BareMetalInstanceSpec{
+					HostType:    "compute",
+					TemplateID:  shared.OsacNoopTemplate,
+					RunStrategy: v1alpha1.RunStrategyAlways,
+				},
+			}
+			Expect(k8sClient.Create(ctx, bmi)).To(Succeed())
+
+			// Inject exactly one conflict, on the Update that carries the management
+			// finalizer. Inventory/management backends keep using the raw client, so
+			// only the finalizer-add write is affected.
+			baseClient, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
+			Expect(err).NotTo(HaveOccurred())
+
+			conflictInjected := false
+			conflictClient := interceptor.NewClient(baseClient, interceptor.Funcs{
+				Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+					if !conflictInjected {
+						if inst, ok := obj.(*v1alpha1.BareMetalInstance); ok &&
+							controllerutil.ContainsFinalizer(inst, BareMetalInstanceManagementFinalizer) {
+							conflictInjected = true
+							return apierrors.NewConflict(
+								schema.GroupResource{Group: "osac.openshift.io", Resource: "baremetalinstances"},
+								inst.Name, fmt.Errorf("the object has been modified"))
+						}
+					}
+					return c.Update(ctx, obj, opts...)
+				},
+			})
+
+			reconciler := NewBareMetalInstanceReconciler(
+				conflictClient,
+				k8sClient.Scheme(),
+				inventory.NewMetal3ClientForTest(k8sClient, metal3TestNS, metal3HostClass),
+				management.NewMetal3ClientForTest(k8sClient, metal3TestNS),
+				nil, nil, nil, nil,
+				0, 0, 0, 0,
+			)
+
+			// Allocation (finalizer, find, assign) — no conflict yet.
+			reconcileN(reconciler, bmiName, 3)
+			bmi = getBMI(bmiName)
+			Expect(bmi.Spec.HostClass).To(Equal(metal3HostClass))
+
+			// This reconcile adds the management finalizer; the injected conflict
+			// makes the Update fail. Reconcile must surface the error (→ requeue)
+			// and leave the phase un-Failed.
+			_, err = reconciler.Reconcile(ctx, ctrl.Request{
+				NamespacedName: types.NamespacedName{Name: bmiName, Namespace: metal3TestNS},
+			})
+			Expect(err).To(HaveOccurred())
+			Expect(apierrors.IsConflict(err)).To(BeTrue())
+			Expect(conflictInjected).To(BeTrue())
+
+			bmi = getBMI(bmiName)
+			Expect(bmi.Status.Phase).NotTo(Equal(v1alpha1.BareMetalInstancePhaseFailed))
+
+			// Retry (no further injected conflicts): the finalizer is added and the
+			// instance recovers instead of being stuck in Failed.
+			reconcileN(reconciler, bmiName, 1)
+			bmi = getBMI(bmiName)
+			Expect(bmi.Finalizers).To(ContainElement(BareMetalInstanceManagementFinalizer))
+			Expect(bmi.Status.Phase).NotTo(Equal(v1alpha1.BareMetalInstancePhaseFailed))
 		})
 	})
 

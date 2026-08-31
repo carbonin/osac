@@ -358,7 +358,7 @@ func (r *BareMetalInstanceReconciler) reconcileManagement(ctx context.Context, b
 
 	if controllerutil.AddFinalizer(bareMetalInstance, BareMetalInstanceManagementFinalizer) {
 		if err := r.Update(ctx, bareMetalInstance); err != nil {
-			bareMetalInstance.Status.Phase = v1alpha1.BareMetalInstancePhaseFailed
+			log.Error(err, "Failed to add management finalizer, will retry")
 			return ctrl.Result{}, err
 		}
 		bareMetalInstance.Status.Phase = v1alpha1.BareMetalInstancePhaseProgressing
