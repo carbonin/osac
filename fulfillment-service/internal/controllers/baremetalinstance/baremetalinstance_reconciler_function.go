@@ -15,6 +15,7 @@ package baremetalinstance
 
 //go:generate mockgen -destination=bare_metal_instances_client_mock.go -package=baremetalinstance github.com/osac-project/osac/proto/gen/osac/private/v1 BareMetalInstancesClient
 //go:generate mockgen -destination=secrets_client_mock.go -package=baremetalinstance github.com/osac-project/osac/proto/gen/osac/private/v1 SecretsClient
+//go:generate mockgen -destination=disk_images_client_mock.go -package=baremetalinstance github.com/osac-project/osac/proto/gen/osac/private/v1 DiskImagesClient
 
 import (
 	"context"
@@ -70,6 +71,7 @@ type function struct {
 	bareMetalInstanceTemplatesClient    privatev1.BareMetalInstanceTemplatesClient
 	hubsClient                          privatev1.HubsClient
 	secretsClient                       privatev1.SecretsClient
+	diskImagesClient                    privatev1.DiskImagesClient
 	maskCalculator                      *masks.Calculator
 }
 
@@ -128,6 +130,7 @@ func (b *FunctionBuilder) Build() (result controllers.ReconcilerFunction[*privat
 		bareMetalInstanceTemplatesClient:    privatev1.NewBareMetalInstanceTemplatesClient(b.connection),
 		hubsClient:                          privatev1.NewHubsClient(b.connection),
 		secretsClient:                       privatev1.NewSecretsClient(b.connection),
+		diskImagesClient:                    privatev1.NewDiskImagesClient(b.connection),
 		hubCache:                            b.hubCache,
 		maskCalculator:                      masks.NewCalculator().Build(),
 	}
@@ -722,13 +725,15 @@ func (t *task) mutateBMI(ctx context.Context, object *bmfov1alpha1.BareMetalInst
 	if t.userDataSecretName != "" {
 		params["userDataSecret"] = t.userDataSecretName
 	}
-	if t.bareMetalInstance.GetSpec().HasImage() {
-		params["imageURL"] = t.bareMetalInstance.GetSpec().GetImage().GetSourceRef()
-		if st := t.bareMetalInstance.GetSpec().GetImage().GetSourceType(); st != "" {
-			params["imageSourceType"] = st
-		} else {
-			delete(params, "imageSourceType")
+	if diskImageRef := t.bareMetalInstance.GetSpec().GetDiskImage(); diskImageRef != nil {
+		diskImageKey := controllers.RefKeyStr(diskImageRef)
+		diResp, diErr := t.r.diskImagesClient.Get(ctx, privatev1.DiskImagesGetRequest_builder{
+			Id: diskImageKey,
+		}.Build())
+		if diErr != nil {
+			return fmt.Errorf("failed to resolve disk image '%s': %w", diskImageKey, diErr)
 		}
+		params["imageURL"] = diResp.GetObject().GetSpec().GetSourceRef()
 	}
 	if len(params) > 0 {
 		paramsJSON, err := json.Marshal(params)
