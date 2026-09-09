@@ -41,12 +41,7 @@ def ssh_public_key() -> Generator[str, None, None]:
 
 @pytest.fixture(scope="session")
 def bmi_disk_image(grpc: GRPCClient, test_run_id: str) -> Generator[str, None, None]:
-    """Create a default DiskImage for BMaaS E2E tests; clean up after.
-
-    The BMH's imageURL used to come from osac-aap's hardcoded default; now that the
-    reconciler resolves imageURL from spec.disk_image, the E2E catalog item must default
-    disk_image itself (see the `catalog_item` fixture below).
-    """
+    """Create a default DiskImage for BMaaS E2E tests and clean it up afterward."""
     di_name = f"e2e-bmi-di-{test_run_id}"
     di_id = grpc.create_disk_image(name=di_name, source_ref="oci://quay.io/osac-project/fedora-cloud-bmi:44")
 
