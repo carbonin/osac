@@ -78,6 +78,12 @@ func Cmd() *cobra.Command {
 		"",
 		runStrategyFlagHelp,
 	)
+	flags.StringVar(
+		&runner.args.diskImage,
+		"disk-image",
+		"",
+		diskImageFlagHelp,
+	)
 	flags.BoolVar(
 		&runner.args.externalIPAttachment,
 		"external-ip-attachment",
@@ -112,6 +118,7 @@ type runnerContext struct {
 		sshKey               string
 		userData             string
 		runStrategy          string
+		diskImage            string
 		externalIPAttachment bool
 	}
 	logger *slog.Logger
@@ -149,34 +156,8 @@ func (c *runnerContext) run(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	spec := publicv1.BareMetalInstanceSpec_builder{
-		CatalogItem: &publicv1.BareMetalInstanceCatalogItemReference{Id: catalogItem.GetId()},
-	}
-	if c.args.sshKey != "" {
-		sshKey := c.args.sshKey
-		spec.SshPublicKey = &sshKey
-	}
-	if c.args.userData != "" {
-		userData := c.args.userData
-		spec.UserData = &userData
-	}
-	if c.args.runStrategy != "" {
-		rs, err := fieldutil.ParseEnum(c.args.runStrategy, runStrategyMap, "run-strategy")
-		if err != nil {
-			return err
-		}
-		spec.RunStrategy = &rs
-	}
-	if cmd.Flags().Changed("external-ip-attachment") {
-		spec.AutoExternalIpAttachment = proto.Bool(c.args.externalIPAttachment)
-	}
-
-	if err := c.applyNetworkingFlags(&spec); err != nil {
-		return err
-	}
-
-	builtSpec := spec.Build()
-	if err := fieldutil.ApplyFields(builtSpec, c.args.setFields); err != nil {
+	builtSpec, err := c.buildSpec(catalogItem.GetId(), cmd.Flags().Changed("external-ip-attachment"))
+	if err != nil {
 		return err
 	}
 
@@ -197,6 +178,44 @@ func (c *runnerContext) run(cmd *cobra.Command, _ []string) error {
 
 	console.Infof(ctx, "Created bare metal instance '%s'.\n", response.GetObject().GetId())
 	return nil
+}
+
+func (c *runnerContext) buildSpec(catalogItemID string, externalIPAttachmentSet bool) (*publicv1.BareMetalInstanceSpec, error) {
+	spec := publicv1.BareMetalInstanceSpec_builder{
+		CatalogItem: &publicv1.BareMetalInstanceCatalogItemReference{Id: catalogItemID},
+	}
+	if c.args.sshKey != "" {
+		sshKey := c.args.sshKey
+		spec.SshPublicKey = &sshKey
+	}
+	if c.args.userData != "" {
+		userData := c.args.userData
+		spec.UserData = &userData
+	}
+	if c.args.diskImage != "" {
+		spec.DiskImage = &publicv1.DiskImageReference{Name: c.args.diskImage}
+	}
+	if c.args.runStrategy != "" {
+		rs, err := fieldutil.ParseEnum(c.args.runStrategy, runStrategyMap, "run-strategy")
+		if err != nil {
+			return nil, err
+		}
+		spec.RunStrategy = &rs
+	}
+	if externalIPAttachmentSet {
+		spec.AutoExternalIpAttachment = proto.Bool(c.args.externalIPAttachment)
+	}
+
+	if err := c.applyNetworkingFlags(&spec); err != nil {
+		return nil, err
+	}
+
+	builtSpec := spec.Build()
+	if err := fieldutil.ApplyFields(builtSpec, c.args.setFields); err != nil {
+		return nil, err
+	}
+
+	return builtSpec, nil
 }
 
 const shortHelp = `Create a bare metal instance`
@@ -227,6 +246,11 @@ const runStrategyFlagHelp = `
 _STRATEGY_ - Run strategy controlling the power state. Valid values are
 {{ bt }}Always{{ bt }} (keep powered on) and {{ bt }}Halted{{ bt }}
 (power off).
+`
+
+const diskImageFlagHelp = `
+_NAME_ - DiskImage resource name to use for this bare metal instance. When
+omitted, the catalog item must provide a default.
 `
 
 const externalIPAttachmentFlagHelp = `
