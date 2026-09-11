@@ -65,6 +65,7 @@ type PrivateBareMetalInstancesServer struct {
 	virtualNetworksDao      *dao.GenericDAO[*privatev1.VirtualNetwork]
 	networkClassesDao       *dao.GenericDAO[*privatev1.NetworkClass]
 	securityGroupsDao       *dao.GenericDAO[*privatev1.SecurityGroup]
+	diskImagesDao           *dao.GenericDAO[*privatev1.DiskImage]
 	externalIPPoolDao       *dao.GenericDAO[*privatev1.ExternalIPPool]
 	externalIPDao           *dao.GenericDAO[*privatev1.ExternalIP]
 	externalIPAttachmentDao *dao.GenericDAO[*privatev1.ExternalIPAttachment]
@@ -190,6 +191,15 @@ func (b *PrivateBareMetalInstancesServerBuilder) Build() (result *PrivateBareMet
 		return
 	}
 
+	diskImagesDao, err := dao.NewGenericDAO[*privatev1.DiskImage]().
+		SetLogger(b.logger).
+		SetTenancyLogic(b.tenancyLogic).
+		SetMetricsRegisterer(b.metricsRegisterer).
+		Build()
+	if err != nil {
+		return
+	}
+
 	externalIPPoolDao, err := dao.NewGenericDAO[*privatev1.ExternalIPPool]().
 		SetLogger(b.logger).
 		SetTenancyLogic(b.tenancyLogic).
@@ -251,6 +261,7 @@ func (b *PrivateBareMetalInstancesServerBuilder) Build() (result *PrivateBareMet
 		virtualNetworksDao:      virtualNetworksDao,
 		networkClassesDao:       networkClassesDao,
 		securityGroupsDao:       securityGroupsDao,
+		diskImagesDao:           diskImagesDao,
 		externalIPPoolDao:       externalIPPoolDao,
 		externalIPDao:           externalIPDao,
 		externalIPAttachmentDao: externalIPAttachmentDao,
@@ -298,6 +309,9 @@ func (s *PrivateBareMetalInstancesServer) Create(ctx context.Context,
 			return
 		}
 	}
+	if err = s.validateDiskImage(ctx, request.GetObject()); err != nil {
+		return
+	}
 	if err = s.validateSpec(request.GetObject()); err != nil {
 		return
 	}
@@ -334,6 +348,39 @@ func (s *PrivateBareMetalInstancesServer) Create(ctx context.Context,
 		}
 	}
 	return
+}
+
+// validateDiskImage resolves the disk_image reference after catalog or template defaults
+// have been applied. The DAO enforces tenant visibility, while the preferred tenant makes
+// same-name tenant and shared images resolve deterministically for the caller.
+func (s *PrivateBareMetalInstancesServer) validateDiskImage(
+	ctx context.Context,
+	bmi *privatev1.BareMetalInstance,
+) error {
+	diskImageRef := bmi.GetSpec().GetDiskImage()
+	if diskImageRef == nil {
+		return nil
+	}
+
+	key := refKey(diskImageRef)
+	if key == "" {
+		return nil
+	}
+
+	preferredTenant, err := s.tenancyLogic.DetermineDefaultTenant(ctx)
+	if err != nil {
+		return grpcstatus.Errorf(grpccodes.Internal, "failed to determine tenant: %v", err)
+	}
+
+	diskImage, _, err := validateDiskImageState(ctx, s.diskImagesDao, key, preferredTenant, "")
+	if err != nil {
+		return err
+	}
+
+	diskImageRef.Id = diskImage.GetId()
+	diskImageRef.Name = diskImage.GetMetadata().GetName()
+	diskImageRef.Shared = diskImage.GetMetadata().GetTenant() == auth.SharedTenant
+	return nil
 }
 
 func (s *PrivateBareMetalInstancesServer) Update(ctx context.Context,
