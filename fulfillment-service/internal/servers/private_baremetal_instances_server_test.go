@@ -478,6 +478,28 @@ var _ = Describe("Private bare metal instances server", func() {
 			Expect(response.GetObject().GetSpec().GetDiskImage().GetShared()).To(BeFalse())
 		})
 
+		It("Preserves disk_image ID precedence over a name collision", func() {
+			templateID := fmt.Sprintf("disk-image-template-%s", uuid.NewString()[:8])
+			const diskImageID = "bmi-disk-image-id"
+			createTemplate(templateID, nil)
+			createAvailableDiskImageInTenant(diskImageID, "bmi-disk-image", testTenant)
+			createAvailableDiskImageInTenant("bmi-disk-image-name-collision", diskImageID, testTenant)
+
+			response, err := server.Create(ctx, privatev1.BareMetalInstancesCreateRequest_builder{
+				Object: privatev1.BareMetalInstance_builder{
+					Metadata: privatev1.Metadata_builder{Name: fmt.Sprintf("test-%s", uuid.NewString()[:8])}.Build(),
+					Spec: privatev1.BareMetalInstanceSpec_builder{
+						Template:     privatev1.BareMetalInstanceTemplateReference_builder{Id: templateID}.Build(),
+						DiskImage:    privatev1.DiskImageReference_builder{Id: diskImageID}.Build(),
+						SshPublicKey: new(testSSHPublicKey),
+					}.Build(),
+				}.Build(),
+			}.Build())
+			Expect(err).ToNot(HaveOccurred())
+			Expect(response.GetObject().GetSpec().GetDiskImage().GetId()).To(Equal(diskImageID))
+			Expect(response.GetObject().GetSpec().GetDiskImage().GetName()).To(Equal("bmi-disk-image"))
+		})
+
 		It("Rejects an unknown disk_image reference before creating the BMI", func() {
 			templateID := fmt.Sprintf("missing-disk-image-template-%s", uuid.NewString()[:8])
 			createTemplate(templateID, nil)

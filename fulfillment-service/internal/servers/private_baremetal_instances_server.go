@@ -384,7 +384,7 @@ func (s *PrivateBareMetalInstancesServer) validateDiskImage(
 		return nil, grpcstatus.Errorf(grpccodes.Internal, "failed to determine tenant: %v", err)
 	}
 
-	diskImage, warnings, err := validateLockedDiskImageState(ctx, s.diskImagesDao, key, preferredTenant, "")
+	diskImage, warnings, err := validateLockedDiskImageState(ctx, s.diskImagesDao, diskImageRef, preferredTenant, "")
 	if err != nil {
 		return nil, err
 	}
@@ -398,17 +398,22 @@ func (s *PrivateBareMetalInstancesServer) validateDiskImage(
 func validateLockedDiskImageState(
 	ctx context.Context,
 	diskImagesDao *dao.GenericDAO[*privatev1.DiskImage],
-	key string,
+	diskImageRef *privatev1.DiskImageReference,
 	preferredTenant string,
 	source string,
 ) (*privatev1.DiskImage, []string, error) {
-	diskImage, err := getDiskImage(ctx, diskImagesDao, key, preferredTenant, source)
-	if err != nil {
-		return nil, nil, err
+	key := refKey(diskImageRef)
+	id := diskImageRef.GetId()
+	if id == "" {
+		diskImage, err := getDiskImage(ctx, diskImagesDao, key, preferredTenant, source)
+		if err != nil {
+			return nil, nil, err
+		}
+		id = diskImage.GetId()
 	}
 
 	lockedResponse, err := diskImagesDao.Get().
-		SetId(diskImage.GetId()).
+		SetId(id).
 		SetLock(true).
 		Do(ctx)
 	if err != nil {
