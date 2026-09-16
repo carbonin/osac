@@ -104,6 +104,20 @@ def bmi_template(private_grpc: GRPCClient) -> str:
     return items[0]["metadata"]["name"]
 
 
+@pytest.fixture(scope="module")
+def ref_bmi_disk_image(grpc: GRPCClient) -> Generator[str, None, None]:
+    tag = uuid4().hex[:8]
+    name = f"ref-bmi-di-{tag}"
+    disk_image_id = grpc.create_disk_image(name=name, source_ref="oci://quay.io/osac-project/fedora-cloud-bmi:44")
+    try:
+        yield name
+    finally:
+        try:
+            grpc.delete_disk_image(disk_image_id=disk_image_id)
+        except subprocess.CalledProcessError:
+            logger.warning("Failed to cleanup BMI disk image %s", name)
+
+
 class TestClusterBareMetalReferences:
     """OSAC-3110: Cluster and bare metal resource reference tests."""
 
@@ -142,7 +156,9 @@ class TestClusterBareMetalReferences:
                 logger.warning("Failed to cleanup cluster catalog item %s", cat_id)
 
     @pytest.mark.requires_bmaas
-    def test_baremetal_instance_chain_by_name(self, private_grpc: GRPCClient, grpc: GRPCClient, bmi_template: str):
+    def test_baremetal_instance_chain_by_name(
+        self, private_grpc: GRPCClient, grpc: GRPCClient, bmi_template: str, ref_bmi_disk_image: str
+    ):
         tag = uuid4().hex[:8]
         cat_name = f"ref-bmi-cat-{tag}"
 
@@ -163,7 +179,11 @@ class TestClusterBareMetalReferences:
                 data={
                     "object": {
                         "metadata": {"name": f"ref-bmi-{tag}"},
-                        "spec": {"catalog_item": {"name": cat_name}, "ssh_public_key": _TEST_SSH_PUBLIC_KEY},
+                        "spec": {
+                            "catalog_item": {"name": cat_name},
+                            "disk_image": {"name": ref_bmi_disk_image},
+                            "ssh_public_key": _TEST_SSH_PUBLIC_KEY,
+                        },
                     }
                 },
             )
