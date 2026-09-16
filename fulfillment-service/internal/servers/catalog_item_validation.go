@@ -430,6 +430,10 @@ func validateDiskImageState(
 	preferredTenant string,
 	source string,
 ) (*privatev1.DiskImage, []string, error) {
+	if key == "" {
+		return nil, nil, nil
+	}
+
 	diskImage, err := getDiskImage(ctx, diskImagesDao, key, preferredTenant, source)
 	if err != nil {
 		return nil, nil, err
