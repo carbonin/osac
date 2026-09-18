@@ -6,7 +6,8 @@ from typing import Any
 
 import pytest
 
-from tests.e2e.core.grpc_client import GRPCClient
+from tests.e2e.bmaas.conftest import BMI_DISK_IMAGE_SOURCE_REF
+from tests.e2e.core.grpc_client import PUBLIC_API, GRPCClient
 from tests.e2e.core.helpers import (
     wait_for_bmh_available,
     wait_for_bmh_provisioned,
@@ -85,8 +86,8 @@ def _get_status_restart_trigger(grpc: GRPCClient, bmi_id: str) -> int:
 
 
 def test_baremetal_instance_lifecycle(
-    cli: OsacCLI,
-    grpc: GRPCClient,
+    jwt_cli_user: OsacCLI,
+    jwt_grpc_tenant1: GRPCClient,
     k8s_hub_client: K8sClient,
     catalog_item: str,
     bmi_disk_image: str,
@@ -95,17 +96,20 @@ def test_baremetal_instance_lifecycle(
     ssh_public_key: str,
 ) -> None:
     name = f"e2e-bmi-{test_run_id}"
-    bmi_id: str = cli.create_baremetal_instance(
+    disk_images: dict[str, Any] = jwt_grpc_tenant1.call(service=f"{PUBLIC_API}.DiskImages/List")
+    assert bmi_disk_image in {item["metadata"]["name"] for item in disk_images.get("items", [])}
+
+    bmi_id: str = jwt_cli_user.create_baremetal_instance(
         name=name, catalog_item=catalog_item, ssh_key=ssh_public_key, disk_image=bmi_disk_image
     )
     bmh_ns = ""
     bmh_name = ""
 
     try:
-        assert bmi_id in grpc.list_baremetal_instance_ids()
+        assert bmi_id in jwt_grpc_tenant1.list_baremetal_instance_ids()
 
         bmi_cr_name: str = wait_for_bmi_cr(k8s=k8s_hub_client, uuid=bmi_id)
-        wait_for_bmi_running(grpc=grpc, bmi_id=bmi_id)
+        wait_for_bmi_running(grpc=jwt_grpc_tenant1, bmi_id=bmi_id)
 
         external_host_id: str = k8s_hub_client.get_baremetal_instance_external_host_id(name=bmi_cr_name)
         assert "/" in external_host_id, f"Expected namespace/name format, got: {external_host_id}"
@@ -114,9 +118,9 @@ def test_baremetal_instance_lifecycle(
 
         # Verify NIC metadata matches the BMH hardware inventory (OSAC-3254)
         _assert_nic_metadata(
-            grpc=grpc,
+            grpc=jwt_grpc_tenant1,
             bmi_id=bmi_id,
-            cli=cli,
+            cli=jwt_cli_user,
             bmi_name=name,
             bmi_cr_name=bmi_cr_name,
             k8s=k8s_hub_client,
@@ -128,7 +132,9 @@ def test_baremetal_instance_lifecycle(
         wait_for_bmh_provisioned(k8s=k8s_hub_client, name=bmh_name, bmh_namespace=bmh_ns)
 
         image_url: str = k8s_hub_client.get_bmh_image_url(name=bmh_name, bmh_namespace=bmh_ns)
-        assert image_url != "", f"BMH {bmh_name} has no image URL after provisioning"
+        assert image_url == BMI_DISK_IMAGE_SOURCE_REF, (
+            f"BMH {bmh_name} image URL {image_url!r} does not match the selected DiskImage"
+        )
 
         consumer_ref: str = k8s_hub_client.get_bmh_consumer_ref(name=bmh_name, bmh_namespace=bmh_ns)
         assert consumer_ref != "", f"BMH {bmh_name} has no consumerRef after allocation"
@@ -138,7 +144,7 @@ def test_baremetal_instance_lifecycle(
 
         # Power off
         halted = "BARE_METAL_INSTANCE_RUN_STRATEGY_HALTED"
-        grpc.update_baremetal_instance_run_strategy(bmi_id=bmi_id, run_strategy=halted)
+        jwt_grpc_tenant1.update_baremetal_instance_run_strategy(bmi_id=bmi_id, run_strategy=halted)
 
         poll_until(
             fn=lambda: k8s_hub_client.get_bmh_powered_on(name=bmh_name, bmh_namespace=bmh_ns),
@@ -149,7 +155,7 @@ def test_baremetal_instance_lifecycle(
         )
 
         # Power on
-        grpc.update_baremetal_instance_run_strategy(
+        jwt_grpc_tenant1.update_baremetal_instance_run_strategy(
             bmi_id=bmi_id, run_strategy="BARE_METAL_INSTANCE_RUN_STRATEGY_ALWAYS"
         )
 
@@ -162,9 +168,9 @@ def test_baremetal_instance_lifecycle(
         )
 
         # Deprovision
-        cli.delete_baremetal_instance(uuid=bmi_id)
+        jwt_cli_user.delete_baremetal_instance(uuid=bmi_id)
         wait_for_bmi_deletion(k8s=k8s_hub_client, name=bmi_cr_name)
-        wait_for_bmi_grpc_removal(grpc=grpc, uuid=bmi_id)
+        wait_for_bmi_grpc_removal(grpc=jwt_grpc_tenant1, uuid=bmi_id)
 
         wait_for_bmh_available(k8s=k8s_hub_client, name=bmh_name, bmh_namespace=bmh_ns)
 
@@ -177,9 +183,9 @@ def test_baremetal_instance_lifecycle(
         bmi_cr: str = k8s_hub_client.get_baremetal_instance_name(uuid=bmi_id, checked=False)
         if bmi_cr:
             try:
-                cli.delete_baremetal_instance(uuid=bmi_id)
+                jwt_cli_user.delete_baremetal_instance(uuid=bmi_id)
                 wait_for_bmi_deletion(k8s=k8s_hub_client, name=bmi_cr)
-                wait_for_bmi_grpc_removal(grpc=grpc, uuid=bmi_id)
+                wait_for_bmi_grpc_removal(grpc=jwt_grpc_tenant1, uuid=bmi_id)
                 if bmh_name:
                     wait_for_bmh_available(k8s=k8s_hub_client, name=bmh_name, bmh_namespace=bmh_ns)
             except Exception:
