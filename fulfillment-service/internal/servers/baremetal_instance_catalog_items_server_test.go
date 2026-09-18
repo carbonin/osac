@@ -164,6 +164,31 @@ var _ = Describe("Bare metal instance catalog items server", func() {
 			Expect(updateResponse.GetObject().GetTemplate().GetId()).To(Equal("my-bmi-template-id"))
 		})
 
+		It("returns DiskImage deprecation warnings from Create and fields updates", func() {
+			createDiskImageWithLifecycle("deprecated-public-create", privatev1.DiskImageLifecycle_DISK_IMAGE_LIFECYCLE_DEPRECATED, nil)
+			createDiskImageWithLifecycle("deprecated-public-update", privatev1.DiskImageLifecycle_DISK_IMAGE_LIFECYCLE_DEPRECATED, nil)
+			createResponse, err := server.Create(ctx, publicv1.BareMetalInstanceCatalogItemsCreateRequest_builder{
+				Object: publicv1.BareMetalInstanceCatalogItem_builder{
+					Metadata: publicv1.Metadata_builder{Name: "public-deprecated-policy-catalog"}.Build(),
+					Template: publicv1.BareMetalInstanceTemplateReference_builder{Id: "my-bmi-template-id"}.Build(),
+					Fields: publicv1.BareMetalInstanceCatalogItemFields_builder{DiskImage: publicv1.DiskImageReferenceFieldPolicy_builder{
+						Editable: publicv1.EditableDiskImageReferenceField_builder{DefaultValue: publicv1.DiskImageReference_builder{Id: "deprecated-public-create"}.Build()}.Build(),
+					}.Build()}.Build(),
+				}.Build(),
+			}.Build())
+			Expect(err).ToNot(HaveOccurred())
+			Expect(createResponse.GetWarnings()).To(ConsistOf(ContainSubstring("deprecated")))
+
+			item := proto.Clone(createResponse.GetObject()).(*publicv1.BareMetalInstanceCatalogItem)
+			item.GetFields().GetDiskImage().GetEditable().SetDefaultValue(publicv1.DiskImageReference_builder{Id: "deprecated-public-update"}.Build())
+			updateResponse, err := server.Update(ctx, publicv1.BareMetalInstanceCatalogItemsUpdateRequest_builder{
+				Object:     item,
+				UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"fields"}},
+			}.Build())
+			Expect(err).ToNot(HaveOccurred())
+			Expect(updateResponse.GetWarnings()).To(ConsistOf(ContainSubstring("deprecated")))
+		})
+
 		It("Fails to create without an object", func() {
 			_, err := server.Create(ctx, publicv1.BareMetalInstanceCatalogItemsCreateRequest_builder{}.Build())
 			Expect(err).To(HaveOccurred())

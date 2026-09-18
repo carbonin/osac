@@ -126,12 +126,100 @@ var _ = Describe("Private bare metal instance catalog items server", func() {
 			}.Build()}.Build())
 			Expect(err).ToNot(HaveOccurred())
 			Expect(response.GetWarnings()).To(ConsistOf(ContainSubstring("deprecated")))
+			defaultValue := response.GetObject().GetFields().GetDiskImage().GetEditable().GetDefaultValue()
+			Expect(defaultValue.GetId()).To(Equal("deprecated-policy-image"))
+			Expect(defaultValue.GetName()).To(Equal("deprecated-policy-image"))
 			updated, err := server.Update(ctx, privatev1.BareMetalInstanceCatalogItemsUpdateRequest_builder{
 				Object:     privatev1.BareMetalInstanceCatalogItem_builder{Id: response.GetObject().GetId(), Title: "Updated title"}.Build(),
 				UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"title"}},
 			}.Build())
 			Expect(err).ToNot(HaveOccurred())
 			Expect(updated.GetWarnings()).To(BeEmpty())
+		})
+
+		It("rejects an obsolete DiskImage default on Create", func() {
+			createDiskImageWithLifecycle("obsolete-policy-image", privatev1.DiskImageLifecycle_DISK_IMAGE_LIFECYCLE_OBSOLETE, nil)
+
+			_, err := server.Create(ctx, privatev1.BareMetalInstanceCatalogItemsCreateRequest_builder{Object: privatev1.BareMetalInstanceCatalogItem_builder{
+				Metadata: privatev1.Metadata_builder{Name: "obsolete-policy-catalog"}.Build(),
+				Template: privatev1.BareMetalInstanceTemplateReference_builder{Id: "my-template-id"}.Build(),
+				Fields: privatev1.BareMetalInstanceCatalogItemFields_builder{DiskImage: privatev1.DiskImageReferenceFieldPolicy_builder{
+					Editable: privatev1.EditableDiskImageReferenceField_builder{DefaultValue: privatev1.DiskImageReference_builder{Id: "obsolete-policy-image"}.Build()}.Build(),
+				}.Build()}.Build(),
+			}.Build()}.Build())
+			Expect(grpcstatus.Code(err)).To(Equal(grpccodes.FailedPrecondition))
+			Expect(err).To(MatchError(ContainSubstring("obsolete")))
+		})
+
+		It("rejects a DiskImage default owned by another tenant on Create", func() {
+			createTenant("other-tenant")
+			createAvailableDiskImageInTenant("other-tenant-policy-image", "other-tenant-policy-image", "other-tenant")
+
+			_, err := server.Create(ctx, privatev1.BareMetalInstanceCatalogItemsCreateRequest_builder{Object: privatev1.BareMetalInstanceCatalogItem_builder{
+				Metadata: privatev1.Metadata_builder{Name: "cross-tenant-policy-catalog"}.Build(),
+				Template: privatev1.BareMetalInstanceTemplateReference_builder{Id: "my-template-id"}.Build(),
+				Fields: privatev1.BareMetalInstanceCatalogItemFields_builder{DiskImage: privatev1.DiskImageReferenceFieldPolicy_builder{
+					Editable: privatev1.EditableDiskImageReferenceField_builder{DefaultValue: privatev1.DiskImageReference_builder{Id: "other-tenant-policy-image"}.Build()}.Build(),
+				}.Build()}.Build(),
+			}.Build()}.Build())
+			Expect(grpcstatus.Code(err)).To(Equal(grpccodes.InvalidArgument))
+			Expect(err).To(MatchError(ContainSubstring("owning tenant or shared tenant")))
+		})
+
+		DescribeTable("validates DiskImage defaults on fields updates", func(name string, lifecycle privatev1.DiskImageLifecycle, expectedCode grpccodes.Code, warning bool) {
+			createResponse, err := server.Create(ctx, privatev1.BareMetalInstanceCatalogItemsCreateRequest_builder{Object: privatev1.BareMetalInstanceCatalogItem_builder{
+				Metadata: privatev1.Metadata_builder{Name: fmt.Sprintf("update-policy-catalog-%s", name)}.Build(),
+				Template: privatev1.BareMetalInstanceTemplateReference_builder{Id: "my-template-id"}.Build(),
+			}.Build()}.Build())
+			Expect(err).ToNot(HaveOccurred())
+			createDiskImageWithLifecycle(fmt.Sprintf("update-policy-image-%s", name), lifecycle, nil)
+
+			response, err := server.Update(ctx, privatev1.BareMetalInstanceCatalogItemsUpdateRequest_builder{
+				Object: privatev1.BareMetalInstanceCatalogItem_builder{
+					Id: createResponse.GetObject().GetId(),
+					Fields: privatev1.BareMetalInstanceCatalogItemFields_builder{DiskImage: privatev1.DiskImageReferenceFieldPolicy_builder{
+						Editable: privatev1.EditableDiskImageReferenceField_builder{DefaultValue: privatev1.DiskImageReference_builder{Id: fmt.Sprintf("update-policy-image-%s", name)}.Build()}.Build(),
+					}.Build()}.Build(),
+				}.Build(),
+				UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"fields"}},
+			}.Build())
+			Expect(grpcstatus.Code(err)).To(Equal(expectedCode))
+			if expectedCode == grpccodes.OK {
+				if warning {
+					Expect(response.GetWarnings()).To(ConsistOf(ContainSubstring("deprecated")))
+				} else {
+					Expect(response.GetWarnings()).To(BeEmpty())
+				}
+				defaultValue := response.GetObject().GetFields().GetDiskImage().GetEditable().GetDefaultValue()
+				Expect(defaultValue.GetId()).To(Equal(fmt.Sprintf("update-policy-image-%s", name)))
+				Expect(defaultValue.GetName()).To(Equal(fmt.Sprintf("update-policy-image-%s", name)))
+			}
+		},
+			Entry("accepts an available image without warnings", "available", privatev1.DiskImageLifecycle_DISK_IMAGE_LIFECYCLE_AVAILABLE, grpccodes.OK, false),
+			Entry("returns a warning for a deprecated image", "deprecated", privatev1.DiskImageLifecycle_DISK_IMAGE_LIFECYCLE_DEPRECATED, grpccodes.OK, true),
+			Entry("rejects an obsolete image", "obsolete", privatev1.DiskImageLifecycle_DISK_IMAGE_LIFECYCLE_OBSOLETE, grpccodes.FailedPrecondition, false),
+		)
+
+		It("rejects a DiskImage default owned by another tenant on fields update", func() {
+			createResponse, err := server.Create(ctx, privatev1.BareMetalInstanceCatalogItemsCreateRequest_builder{Object: privatev1.BareMetalInstanceCatalogItem_builder{
+				Metadata: privatev1.Metadata_builder{Name: "cross-tenant-update-policy-catalog"}.Build(),
+				Template: privatev1.BareMetalInstanceTemplateReference_builder{Id: "my-template-id"}.Build(),
+			}.Build()}.Build())
+			Expect(err).ToNot(HaveOccurred())
+			createTenant("other-update-tenant")
+			createAvailableDiskImageInTenant("other-tenant-update-policy-image", "other-tenant-update-policy-image", "other-update-tenant")
+
+			_, err = server.Update(ctx, privatev1.BareMetalInstanceCatalogItemsUpdateRequest_builder{
+				Object: privatev1.BareMetalInstanceCatalogItem_builder{
+					Id: createResponse.GetObject().GetId(),
+					Fields: privatev1.BareMetalInstanceCatalogItemFields_builder{DiskImage: privatev1.DiskImageReferenceFieldPolicy_builder{
+						Editable: privatev1.EditableDiskImageReferenceField_builder{DefaultValue: privatev1.DiskImageReference_builder{Id: "other-tenant-update-policy-image"}.Build()}.Build(),
+					}.Build()}.Build(),
+				}.Build(),
+				UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"fields"}},
+			}.Build())
+			Expect(grpcstatus.Code(err)).To(Equal(grpccodes.InvalidArgument))
+			Expect(err).To(MatchError(ContainSubstring("owning tenant or shared tenant")))
 		})
 
 		It("Lists objects", func() {
