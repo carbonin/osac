@@ -570,7 +570,7 @@ class GRPCClient:
     def delete_baremetal_instance_catalog_item(self, *, item_id: str, api: str = PUBLIC_API) -> None:
         self.call(service=f"{api}.BareMetalInstanceCatalogItems/Delete", data={"id": item_id})
 
-    # DiskImage operations (public API)
+    # DiskImage operations
 
     def create_disk_image(
         self,
@@ -580,6 +580,7 @@ class GRPCClient:
         source_type: str = "SOURCE_TYPE_REGISTRY",
         guest_os_family: str = "GUEST_OS_FAMILY_LINUX",
         name: str | None = None,
+        api: str = PUBLIC_API,
     ) -> str:
         spec: dict[str, Any] = {
             "source_type": source_type,
@@ -590,7 +591,7 @@ class GRPCClient:
         obj: dict[str, Any] = {"spec": spec}
         if name is not None:
             obj["metadata"] = {"name": name}
-        response: dict[str, Any] = self.call(service=f"{PUBLIC_API}.DiskImages/Create", data={"object": obj})
+        response: dict[str, Any] = self.call(service=f"{api}.DiskImages/Create", data={"object": obj})
         return response["object"]["id"]
 
     def get_disk_image(self, *, disk_image_id: str) -> dict[str, Any]:
@@ -601,17 +602,19 @@ class GRPCClient:
         response: dict[str, Any] = self.call(service=f"{PUBLIC_API}.DiskImages/List", data=data)
         return [item["id"] for item in response.get("items", [])]
 
-    def update_disk_image_lifecycle(self, *, disk_image_id: str, lifecycle: str) -> dict[str, Any]:
+    def update_disk_image_lifecycle(
+        self, *, disk_image_id: str, lifecycle: str, api: str = PUBLIC_API
+    ) -> dict[str, Any]:
         return self.call(
-            service=f"{PUBLIC_API}.DiskImages/Update",
+            service=f"{api}.DiskImages/Update",
             data={
                 "object": {"id": disk_image_id, "spec": {"lifecycle": lifecycle}},
                 "updateMask": {"paths": ["spec.lifecycle"]},
             },
         )
 
-    def delete_disk_image(self, *, disk_image_id: str) -> None:
-        self.call(service=f"{PUBLIC_API}.DiskImages/Delete", data={"id": disk_image_id})
+    def delete_disk_image(self, *, disk_image_id: str, api: str = PUBLIC_API) -> None:
+        self.call(service=f"{api}.DiskImages/Delete", data={"id": disk_image_id})
 
     # ComputeInstance creation with explicit DiskImage (public API)
 
