@@ -339,7 +339,7 @@ def test_bmi_catalog_item_rejects_cross_tenant_disk_image(
             )
         except subprocess.CalledProcessError as exc:
             combined = (exc.stderr or "") + (exc.stdout or "")
-            assert re.search(r"Code:\\s*NotFound", combined), f"Expected gRPC NotFound, got: {combined.strip()}"
+            assert re.search(r"Code:\s*NotFound", combined), f"Expected gRPC NotFound, got: {combined.strip()}"
         else:
             catalog_item_id = response["object"]["id"]
             pytest.fail("Cross-tenant DiskImage reference unexpectedly created a CatalogItem")
