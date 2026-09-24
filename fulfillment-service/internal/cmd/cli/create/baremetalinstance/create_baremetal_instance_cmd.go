@@ -16,7 +16,6 @@ package baremetalinstance
 import (
 	"fmt"
 	"log/slog"
-	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -186,7 +185,9 @@ func (c *runnerContext) run(cmd *cobra.Command, _ []string) error {
 	}
 
 	for _, warning := range response.GetWarnings() {
-		fmt.Fprintf(os.Stderr, "Warning: %s\n", warning)
+		if _, err := fmt.Fprintf(console.Stderr(), "Warning: %s\n", warning); err != nil {
+			return fmt.Errorf("bare metal instance %q was created, but failed to display warning: %w", response.GetObject().GetId(), err)
+		}
 	}
 	console.Infof(ctx, "Created bare metal instance '%s'.\n", response.GetObject().GetId())
 	return nil
