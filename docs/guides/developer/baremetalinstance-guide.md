@@ -31,13 +31,15 @@ export REPOSITORY="osac/rhel9"
 export TAG="9.4"
 export QCOW2="./rhel-9.4-x86_64.qcow2"
 
-oras push -a disktype=qcow2 --artifact-platform linux/x86_64 \
+oras push -a disktype=qcow2 --artifact-platform linux/amd64 \
   "$REGISTRY/$REPOSITORY:$TAG" "$QCOW2"
 ```
 
 The `disktype=qcow2` annotation and platform metadata in this command identify
-the artifact as a Linux QCOW2 image. For an immutable artifact selection,
-record the manifest digest reported by `oras push` and use
+the artifact as a Linux QCOW2 image. The `--artifact-platform` option is
+experimental in ORAS 1.3; check the [ORAS push documentation](https://oras.land/docs/commands/oras_push/)
+for version-specific behavior. For an immutable artifact selection, record the
+manifest digest reported by `oras push` and use
 `oci://$REGISTRY/$REPOSITORY@sha256:<digest>` as the source reference. Use a
 tag reference when you intend the selected artifact to change if the tag is
 updated.
@@ -98,8 +100,11 @@ default:
 | DiskImage is `OBSOLETE` | `FailedPrecondition` |
 | Delete is requested for a DiskImage still referenced by a BMI or CatalogItem | `FailedPrecondition`; the deletion is blocked |
 
-Warnings describe accepted input; they do not indicate that OSAC inspected or
-can retrieve the artifact behind `source_ref`.
+Deprecated-image warning details are available in the gRPC Create response.
+The REST Create endpoint returns only the BareMetalInstance object, and the
+CLI displays a success message without showing warning details. Warnings
+describe accepted input; they do not indicate that OSAC inspected or can
+retrieve the artifact behind `source_ref`.
 
 A DiskImage cannot be deleted while a BareMetalInstance or BareMetalInstance
 CatalogItem still references it. The deletion request returns
@@ -141,9 +146,9 @@ the command to succeed with that default image. Upgrade the CLI and CatalogItem
 definitions together; mixed-version deployments are not supported.
 
 There is no generic in-place downgrade procedure for this breaking contract.
-Do not apply migration SQL manually. Before rolling back a release, delete
-DiskImage-backed BareMetalInstances and CatalogItems that reference DiskImages.
-Recreate them as legacy resources after the rollback if the target release
-requires `image`.
-Use a release-specific, tested rollback runbook that covers the exact service
-and database versions.
+Before rolling back a release, delete DiskImage-backed BareMetalInstances and
+CatalogItems that reference DiskImages. A release-specific, tested rollback
+runbook must then reverse the relevant database migration before deploying the
+prior service. Do not apply migration SQL manually; follow that runbook for the
+exact service and database versions. Recreate the resources as legacy objects
+after the rollback if the target release requires `image`.

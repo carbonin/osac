@@ -559,8 +559,8 @@ type BareMetalInstancesCreateResponse_builder struct {
 	_ [0]func() // Prevents comparability and use of unkeyed literals for the builder.
 
 	Object *BareMetalInstance
-	// Non-fatal validation warnings for accepted input. For example, a deprecated `disk_image` is accepted and
-	// reported here so callers can migrate to a replacement.
+	// Non-fatal validation warnings for accepted input, returned by the gRPC Create response. For example, a deprecated
+	// `disk_image` is accepted and reported here so callers can migrate to a replacement.
 	Warnings []string
 }
 

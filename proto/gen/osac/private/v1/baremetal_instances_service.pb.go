@@ -464,8 +464,8 @@ func (b0 BareMetalInstancesCreateRequest_builder) Build() *BareMetalInstancesCre
 type BareMetalInstancesCreateResponse struct {
 	state  protoimpl.MessageState `protogen:"hybrid.v1"`
 	Object *BareMetalInstance     `protobuf:"bytes,1,opt,name=object,proto3" json:"object,omitempty"`
-	// Non-fatal validation warnings for accepted input. For example, a deprecated `disk_image` is accepted and
-	// reported here so callers can migrate to a replacement.
+	// Non-fatal validation warnings for accepted input, returned by the gRPC Create response. For example, a deprecated
+	// `disk_image` is accepted and reported here so callers can migrate to a replacement.
 	Warnings      []string `protobuf:"bytes,2,rep,name=warnings,proto3" json:"warnings,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -533,8 +533,8 @@ type BareMetalInstancesCreateResponse_builder struct {
 	_ [0]func() // Prevents comparability and use of unkeyed literals for the builder.
 
 	Object *BareMetalInstance
-	// Non-fatal validation warnings for accepted input. For example, a deprecated `disk_image` is accepted and
-	// reported here so callers can migrate to a replacement.
+	// Non-fatal validation warnings for accepted input, returned by the gRPC Create response. For example, a deprecated
+	// `disk_image` is accepted and reported here so callers can migrate to a replacement.
 	Warnings []string
 }
 
