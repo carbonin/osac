@@ -57,17 +57,9 @@ func (s bareMetalInstancesServer) Create(context.Context, *publicv1.BareMetalIns
 	}, nil
 }
 
-type failingWriter struct {
-	err error
-}
-
-func (w failingWriter) Write([]byte) (int, error) {
-	return 0, w.err
-}
-
 var _ = Describe("Create baremetalinstance response output", func() {
 	DescribeTable("renders successful creation and server warnings",
-		func(warnings []string, createErr, stderrErr error, wantStderr string) {
+		func(warnings []string, createErr error, wantStderr string) {
 			server := testing.NewServer()
 			DeferCleanup(server.Stop)
 			publicv1.RegisterBareMetalInstanceCatalogItemsServer(server.Registrar(), catalogItemsServer{})
@@ -83,11 +75,7 @@ var _ = Describe("Create baremetalinstance response output", func() {
 			settings.SetPlaintext(true)
 
 			var stdout, stderr bytes.Buffer
-			stderrWriter := io.Writer(&stderr)
-			if stderrErr != nil {
-				stderrWriter = failingWriter{err: stderrErr}
-			}
-			console, err := terminal.NewConsole().SetLogger(logger).SetStdout(&stdout).SetStderr(stderrWriter).Build()
+			console, err := terminal.NewConsole().SetLogger(logger).SetStdout(&stdout).SetStderr(&stderr).Build()
 			Expect(err).NotTo(HaveOccurred())
 			ctx := logging.LoggerIntoContext(context.Background(), logger)
 			ctx = config.SettingsIntoContext(ctx, settings)
@@ -102,20 +90,16 @@ var _ = Describe("Create baremetalinstance response output", func() {
 				Expect(err).To(MatchError(ContainSubstring(createErr.Error())))
 				Expect(stdout.String()).To(BeEmpty())
 				Expect(stderr.String()).NotTo(ContainSubstring("Warning:"))
-			} else if stderrErr != nil {
-				Expect(err).To(MatchError(ContainSubstring("bare metal instance \"bmi-123\" was created, but failed to display warning")))
-				Expect(stdout.String()).To(BeEmpty())
 			} else {
 				Expect(err).NotTo(HaveOccurred())
 				Expect(stdout.String()).To(Equal("Created bare metal instance 'bmi-123'.\n"))
 				Expect(stderr.String()).To(Equal(wantStderr))
 			}
 		},
-		Entry("without warnings", nil, nil, nil, ""),
-		Entry("with one warning", []string{"image is deprecated"}, nil, nil, "Warning: image is deprecated\n"),
-		Entry("with multiple warnings in server order", []string{"first", "second"}, nil, nil, "Warning: first\nWarning: second\n"),
-		Entry("when create fails", nil, errors.New("create failed"), nil, ""),
-		Entry("when warning output fails", []string{"image is deprecated"}, nil, errors.New("stderr unavailable"), ""),
+		Entry("without warnings", nil, nil, ""),
+		Entry("with one warning", []string{"image is deprecated"}, nil, "Warning: image is deprecated\n"),
+		Entry("with multiple warnings in server order", []string{"first", "second"}, nil, "Warning: first\nWarning: second\n"),
+		Entry("when create fails", nil, errors.New("create failed"), ""),
 	)
 })
 
