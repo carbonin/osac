@@ -129,26 +129,3 @@ CatalogItem Create and Update validate the selected image. `OBSOLETE` and
 out-of-scope images are rejected. A `DEPRECATED` image is accepted with a
 warning. See [Catalog items](../../../fulfillment-service/docs/CATALOG_ITEMS.md)
 for the complete field-policy rules.
-
-## Upgrade and downgrade
-
-This is a breaking field migration. Before upgrading, replace every pending
-BareMetalInstance and BareMetalInstanceCatalogItem use of `image` with a
-resolvable `disk_image` reference. Existing running or failed instances do not
-reconcile merely because the service is upgraded. The current reconciler
-injects an image URL for provisioning only after it resolves `disk_image`, so
-replace pending legacy objects before upgrading them.
-
-Older OSAC CLI versions must be upgraded because a requested legacy `image` is
-not honored. If no CatalogItem policy supplies an effective `disk_image`, the
-command fails with `InvalidArgument`. A CatalogItem default can instead allow
-the command to succeed with that default image. Upgrade the CLI and CatalogItem
-definitions together; mixed-version deployments are not supported.
-
-There is no generic in-place downgrade procedure for this breaking contract.
-Before rolling back a release, delete DiskImage-backed BareMetalInstances and
-CatalogItems that reference DiskImages. A release-specific, tested rollback
-runbook must then reverse the relevant database migration before deploying the
-prior service. Do not apply migration SQL manually; follow that runbook for the
-exact service and database versions. Recreate the resources as legacy objects
-after the rollback if the target release requires `image`.
