@@ -83,7 +83,7 @@ var _ = Describe("Private bare metal instance types server", func() {
 						Hardware: privatev1.BareMetalHardwareSpec_builder{
 							Cpu: privatev1.BareMetalCPUSpec_builder{
 								Cores:          32,
-								Architecture:   "x86_64",
+								Architecture:   "amd64",
 								Model:          "Intel Xeon Gold",
 								ThreadsPerCore: 2,
 							}.Build(),
@@ -133,7 +133,7 @@ var _ = Describe("Private bare metal instance types server", func() {
 							Hardware: privatev1.BareMetalHardwareSpec_builder{
 								Cpu: privatev1.BareMetalCPUSpec_builder{
 									Cores:          16,
-									Architecture:   "x86_64",
+									Architecture:   "amd64",
 									ThreadsPerCore: 2,
 								}.Build(),
 								Memory: privatev1.BareMetalMemorySpec_builder{
@@ -180,7 +180,7 @@ var _ = Describe("Private bare metal instance types server", func() {
 						Hardware: privatev1.BareMetalHardwareSpec_builder{
 							Cpu: privatev1.BareMetalCPUSpec_builder{
 								Cores:          24,
-								Architecture:   "x86_64",
+								Architecture:   "amd64",
 								ThreadsPerCore: 2,
 							}.Build(),
 							Memory: privatev1.BareMetalMemorySpec_builder{
@@ -239,7 +239,7 @@ var _ = Describe("Private bare metal instance types server", func() {
 						Hardware: privatev1.BareMetalHardwareSpec_builder{
 							Cpu: privatev1.BareMetalCPUSpec_builder{
 								Cores:          8,
-								Architecture:   "x86_64",
+								Architecture:   "amd64",
 								ThreadsPerCore: 2,
 							}.Build(),
 							Memory: privatev1.BareMetalMemorySpec_builder{
@@ -298,7 +298,7 @@ var _ = Describe("Private bare metal instance types server", func() {
 						Hardware: privatev1.BareMetalHardwareSpec_builder{
 							Cpu: privatev1.BareMetalCPUSpec_builder{
 								Cores:          4,
-								Architecture:   "x86_64",
+								Architecture:   "amd64",
 								ThreadsPerCore: 2,
 							}.Build(),
 							Memory: privatev1.BareMetalMemorySpec_builder{
@@ -351,7 +351,7 @@ var _ = Describe("Private bare metal instance types server", func() {
 						Hardware: privatev1.BareMetalHardwareSpec_builder{
 							Cpu: privatev1.BareMetalCPUSpec_builder{
 								Cores:          2,
-								Architecture:   "x86_64",
+								Architecture:   "amd64",
 								ThreadsPerCore: 2,
 							}.Build(),
 							Memory: privatev1.BareMetalMemorySpec_builder{
@@ -396,7 +396,7 @@ var _ = Describe("Private bare metal instance types server", func() {
 							Hardware: privatev1.BareMetalHardwareSpec_builder{
 								Cpu: privatev1.BareMetalCPUSpec_builder{
 									Cores:          16,
-									Architecture:   "x86_64",
+									Architecture:   "amd64",
 									ThreadsPerCore: 2,
 								}.Build(),
 								Memory: privatev1.BareMetalMemorySpec_builder{
@@ -452,7 +452,7 @@ var _ = Describe("Private bare metal instance types server", func() {
 							Hardware: privatev1.BareMetalHardwareSpec_builder{
 								Cpu: privatev1.BareMetalCPUSpec_builder{
 									Cores:          16,
-									Architecture:   "x86_64",
+									Architecture:   "amd64",
 									ThreadsPerCore: 2,
 								}.Build(),
 								Memory: privatev1.BareMetalMemorySpec_builder{
@@ -483,7 +483,7 @@ var _ = Describe("Private bare metal instance types server", func() {
 						Spec: privatev1.BareMetalInstanceTypeSpec_builder{
 							Hardware: privatev1.BareMetalHardwareSpec_builder{
 								Cpu: privatev1.BareMetalCPUSpec_builder{
-									Architecture: "aarch64", // Different value
+									Architecture: "arm64", // Different value
 								}.Build(),
 							}.Build(),
 						}.Build(),
@@ -508,7 +508,7 @@ var _ = Describe("Private bare metal instance types server", func() {
 							Hardware: privatev1.BareMetalHardwareSpec_builder{
 								Cpu: privatev1.BareMetalCPUSpec_builder{
 									Cores:          16,
-									Architecture:   "x86_64",
+									Architecture:   "amd64",
 									ThreadsPerCore: 2,
 								}.Build(),
 								Memory: privatev1.BareMetalMemorySpec_builder{
@@ -564,7 +564,7 @@ var _ = Describe("Private bare metal instance types server", func() {
 							Hardware: privatev1.BareMetalHardwareSpec_builder{
 								Cpu: privatev1.BareMetalCPUSpec_builder{
 									Cores:          16,
-									Architecture:   "x86_64",
+									Architecture:   "amd64",
 									ThreadsPerCore: 2,
 								}.Build(),
 								Memory: privatev1.BareMetalMemorySpec_builder{
@@ -617,7 +617,7 @@ var _ = Describe("Private bare metal instance types server", func() {
 						Hardware: privatev1.BareMetalHardwareSpec_builder{
 							Cpu: privatev1.BareMetalCPUSpec_builder{
 								Cores:          8,
-								Architecture:   "x86_64",
+								Architecture:   "amd64",
 								ThreadsPerCore: 2,
 							}.Build(),
 							Memory: privatev1.BareMetalMemorySpec_builder{
@@ -646,7 +646,7 @@ var _ = Describe("Private bare metal instance types server", func() {
 						Hardware: privatev1.BareMetalHardwareSpec_builder{
 							Cpu: privatev1.BareMetalCPUSpec_builder{
 								Cores:          8,
-								Architecture:   "x86_64",
+								Architecture:   "amd64",
 								ThreadsPerCore: 2,
 							}.Build(),
 							Memory: privatev1.BareMetalMemorySpec_builder{
@@ -698,7 +698,7 @@ var _ = Describe("Private bare metal instance types server", func() {
 						Hardware: privatev1.BareMetalHardwareSpec_builder{
 							Cpu: privatev1.BareMetalCPUSpec_builder{
 								Cores:          8,
-								Architecture:   "x86_64",
+								Architecture:   "amd64",
 								ThreadsPerCore: 2,
 							}.Build(),
 							Memory: privatev1.BareMetalMemorySpec_builder{
@@ -725,7 +725,7 @@ var _ = Describe("Private bare metal instance types server", func() {
 						Hardware: privatev1.BareMetalHardwareSpec_builder{
 							Cpu: privatev1.BareMetalCPUSpec_builder{
 								Cores:          8,
-								Architecture:   "x86_64",
+								Architecture:   "amd64",
 								ThreadsPerCore: 2,
 							}.Build(),
 							Memory: privatev1.BareMetalMemorySpec_builder{
@@ -761,7 +761,7 @@ var _ = Describe("Private bare metal instance types server", func() {
 						Hardware: privatev1.BareMetalHardwareSpec_builder{
 							Cpu: privatev1.BareMetalCPUSpec_builder{
 								Cores:          8,
-								Architecture:   "x86_64",
+								Architecture:   "amd64",
 								ThreadsPerCore: 2,
 							}.Build(),
 							Memory: privatev1.BareMetalMemorySpec_builder{
