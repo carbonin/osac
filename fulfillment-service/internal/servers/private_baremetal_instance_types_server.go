@@ -162,37 +162,31 @@ func (s *PrivateBareMetalInstanceTypesServer) Update(ctx context.Context,
 		return
 	}
 
-	// Fetch the existing object:
-	getRequest := &privatev1.BareMetalInstanceTypesGetRequest{}
-	getRequest.SetId(id)
-	var getResponse *privatev1.BareMetalInstanceTypesGetResponse
-	err = s.generic.Get(ctx, getRequest, &getResponse)
-	if err != nil {
-		return
+	if request.GetUpdateMask() == nil {
+		// Full updates preserve omitted metadata while replacing the complete specification.
+		// Express the supplied metadata fields as paths so they merge with the locked row.
+		request = proto.Clone(request).(*privatev1.BareMetalInstanceTypesUpdateRequest)
+		paths := []string{"spec"}
+		if request.GetObject().HasStatus() {
+			paths = append(paths, "status")
+		}
+		request.GetObject().GetMetadata().ProtoReflect().Range(func(field protoreflect.FieldDescriptor, _ protoreflect.Value) bool {
+			if field.Name() != "version" {
+				paths = append(paths, "metadata."+string(field.Name()))
+			}
+			return true
+		})
+		request.SetUpdateMask(&fieldmaskpb.FieldMask{Paths: paths})
 	}
-
-	existing := getResponse.GetObject()
-
-	// Merge the update into a clone of the existing object:
-	merged := cloneBareMetalInstanceType(existing)
-	applyBareMetalInstanceTypeUpdate(merged, request.GetObject(), request.GetUpdateMask())
-
-	// Validate immutable fields:
-	err = validateBareMetalInstanceTypeImmutability(merged, existing)
-	if err != nil {
-		return
+	if request.GetLock() && request.GetObject().GetMetadata() == nil {
+		// An omitted client version must still participate in the optimistic check.
+		request = proto.Clone(request).(*privatev1.BareMetalInstanceTypesUpdateRequest)
+		request.GetObject().SetMetadata(&privatev1.Metadata{})
 	}
-
-	// Set the merged object back into the request for the generic update. Feeding the merged
-	// metadata (rather than the caller's partial metadata) lets the generic update preserve
-	// unspecified fields and lets the database check_immutable_columns trigger reject changes to
-	// immutable columns such as tenant and project. Preserve the caller's version for the
-	// optimistic concurrency check.
-	clientVersion := request.GetObject().GetMetadata().GetVersion()
-	request.SetObject(merged)
-	request.GetObject().GetMetadata().SetVersion(clientVersion)
-
-	err = s.generic.Update(ctx, request, &response)
+	err = s.generic.UpdateWithCandidatePreparation(ctx, request, &response,
+		func(_ context.Context, current, candidate *privatev1.BareMetalInstanceType) error {
+			return validateBareMetalInstanceTypeImmutability(candidate, current)
+		})
 	return
 }
 
@@ -208,40 +202,6 @@ func (s *PrivateBareMetalInstanceTypesServer) Signal(ctx context.Context,
 	return
 }
 
-// cloneBareMetalInstanceType creates a deep copy of a BareMetalInstanceType.
-func cloneBareMetalInstanceType(bmt *privatev1.BareMetalInstanceType) *privatev1.BareMetalInstanceType {
-	return proto.Clone(bmt).(*privatev1.BareMetalInstanceType)
-}
-
-// applyBareMetalInstanceTypeUpdate applies the update fields onto the base object, respecting the field mask.
-// If no mask is provided, all fields from the update are applied.
-// Field mask paths use the spec prefix (e.g., "spec.description", "spec.hardware") per API conventions.
-func applyBareMetalInstanceTypeUpdate(base, update *privatev1.BareMetalInstanceType, mask *fieldmaskpb.FieldMask) {
-	if mask == nil || len(mask.GetPaths()) == 0 {
-		proto.Merge(base, update)
-		return
-	}
-	for _, path := range mask.GetPaths() {
-		switch path {
-		case "spec.description":
-			base.GetSpec().SetDescription(update.GetSpec().GetDescription())
-		case "spec.hardware":
-			base.GetSpec().SetHardware(update.GetSpec().GetHardware())
-		case "spec.host_label_selector":
-			base.GetSpec().SetHostLabelSelector(update.GetSpec().GetHostLabelSelector())
-		default:
-			// For unknown paths, fall through - the generic handler will
-			// reject invalid paths if needed.
-		}
-	}
-}
-
-// validateBareMetalInstanceTypeImmutability checks that immutable fields have not been changed.
-// Core hardware specifications (CPU cores, memory total_gb) are immutable after creation
-// following the same pattern as PrivateInstanceTypesServer for consistency.
-//
-// Immutability of metadata.tenant and metadata.project is enforced at the database level by the
-// check_immutable_columns trigger, so they are not re-checked here.
 func validateBareMetalInstanceTypeImmutability(merged, existing *privatev1.BareMetalInstanceType) error {
 	// Validate immutable metadata fields:
 	if merged.GetMetadata().GetName() != existing.GetMetadata().GetName() {
@@ -250,11 +210,23 @@ func validateBareMetalInstanceTypeImmutability(merged, existing *privatev1.BareM
 			existing.GetMetadata().GetName(), merged.GetMetadata().GetName())
 	}
 
-	// Hardware is immutable after creation:
-	if !proto.Equal(existing.GetSpec().GetHardware(), merged.GetSpec().GetHardware()) {
-		return grpcstatus.Errorf(grpccodes.InvalidArgument,
-			"field 'spec.hardware' is immutable and cannot be changed after creation")
+	storedHardware := existing.GetSpec().GetHardware()
+	candidateHardware := merged.GetSpec().GetHardware()
+	if proto.Equal(storedHardware, candidateHardware) {
+		return nil
 	}
+	if !isCanonicalBareMetalArchitecture(storedHardware.GetCpu().GetArchitecture()) &&
+		isCanonicalBareMetalArchitecture(candidateHardware.GetCpu().GetArchitecture()) {
+		corrected := proto.Clone(storedHardware).(*privatev1.BareMetalHardwareSpec)
+		corrected.GetCpu().SetArchitecture(candidateHardware.GetCpu().GetArchitecture())
+		if proto.Equal(corrected, candidateHardware) {
+			return nil
+		}
+	}
+	return grpcstatus.Errorf(grpccodes.InvalidArgument,
+		"field 'spec.hardware' is immutable and cannot be changed after creation")
+}
 
-	return nil
+func isCanonicalBareMetalArchitecture(value string) bool {
+	return value == "amd64" || value == "arm64" || value == "s390x"
 }

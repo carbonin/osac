@@ -422,6 +422,7 @@ var _ = Describe("Private bare metal instance types server", func() {
 				Expect(err).ToNot(HaveOccurred())
 
 				_, err = server.Update(ctx, privatev1.BareMetalInstanceTypesUpdateRequest_builder{
+					UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"spec.hardware.cpu.cores"}},
 					Object: privatev1.BareMetalInstanceType_builder{
 						Id: createResponse.GetObject().GetId(),
 						Spec: privatev1.BareMetalInstanceTypeSpec_builder{
@@ -478,6 +479,7 @@ var _ = Describe("Private bare metal instance types server", func() {
 				Expect(err).ToNot(HaveOccurred())
 
 				_, err = server.Update(ctx, privatev1.BareMetalInstanceTypesUpdateRequest_builder{
+					UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"spec.hardware.cpu.architecture"}},
 					Object: privatev1.BareMetalInstanceType_builder{
 						Id: createResponse.GetObject().GetId(),
 						Spec: privatev1.BareMetalInstanceTypeSpec_builder{
@@ -534,6 +536,7 @@ var _ = Describe("Private bare metal instance types server", func() {
 				Expect(err).ToNot(HaveOccurred())
 
 				_, err = server.Update(ctx, privatev1.BareMetalInstanceTypesUpdateRequest_builder{
+					UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"spec.hardware.memory.total_gb"}},
 					Object: privatev1.BareMetalInstanceType_builder{
 						Id: createResponse.GetObject().GetId(),
 						Spec: privatev1.BareMetalInstanceTypeSpec_builder{
@@ -590,6 +593,7 @@ var _ = Describe("Private bare metal instance types server", func() {
 				Expect(err).ToNot(HaveOccurred())
 
 				_, err = server.Update(ctx, privatev1.BareMetalInstanceTypesUpdateRequest_builder{
+					UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"metadata.name"}},
 					Object: privatev1.BareMetalInstanceType_builder{
 						Id: createResponse.GetObject().GetId(),
 						Metadata: privatev1.Metadata_builder{
@@ -672,6 +676,7 @@ var _ = Describe("Private bare metal instance types server", func() {
 			// BareMetalInstanceType is locked to the shared tenant, so an attempt to move it to
 			// another tenant is rejected by the allowed-tenants guard before the object is written.
 			_, err = server.Update(ctx, privatev1.BareMetalInstanceTypesUpdateRequest_builder{
+				UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"metadata.tenant"}},
 				Object: privatev1.BareMetalInstanceType_builder{
 					Id: createResponse.GetObject().GetId(),
 					Metadata: privatev1.Metadata_builder{
@@ -785,6 +790,7 @@ var _ = Describe("Private bare metal instance types server", func() {
 			Expect(err).ToNot(HaveOccurred())
 
 			_, err = server.Update(ctx, privatev1.BareMetalInstanceTypesUpdateRequest_builder{
+				UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"metadata.project"}},
 				Object: privatev1.BareMetalInstanceType_builder{
 					Id: createResponse.GetObject().GetId(),
 					Metadata: privatev1.Metadata_builder{
