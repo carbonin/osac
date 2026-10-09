@@ -19,6 +19,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2/dsl/core"
 	. "github.com/onsi/gomega"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/osac-project/osac/fulfillment-service/internal/uuid"
 	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
@@ -167,5 +169,44 @@ var _ = Describe("Public bare metal instance types", func() {
 		Expect(response).ToNot(BeNil())
 		Expect(response.GetItems()).To(HaveLen(1))
 		Expect(response.GetTotal()).To(BeNumerically(">=", 3))
+	})
+})
+
+var _ = Describe("Public bare metal type architecture", func() {
+	It("returns exact legacy values and identities from public and private Get and List", func() {
+		ctx := context.Background()
+		privateClient := privatev1.NewBareMetalInstanceTypesClient(tool.InternalView().AdminConn())
+		publicClient := publicv1.NewBareMetalInstanceTypesClient(tool.ExternalView().UserConn())
+		for _, architecture := range []string{"x86_64", "aarch64", "AMD64", " amd64 ", "", "ppc64le"} {
+			original := createLegacyArchitectureType(ctx, privateClient, architecture)
+			id := original.GetId()
+			privateGet, err := privateClient.Get(ctx, privatev1.BareMetalInstanceTypesGetRequest_builder{Id: id}.Build())
+			Expect(err).ToNot(HaveOccurred())
+			Expect(proto.Equal(privateGet.GetObject(), original)).To(BeTrue())
+			filter := fmt.Sprintf("this.id == '%s'", id)
+			privateList, err := privateClient.List(ctx, privatev1.BareMetalInstanceTypesListRequest_builder{Filter: &filter}.Build())
+			Expect(err).ToNot(HaveOccurred())
+			Expect(privateList.GetItems()).To(HaveLen(1))
+			Expect(proto.Equal(privateList.GetItems()[0], original)).To(BeTrue())
+			publicGet, err := publicClient.Get(ctx, publicv1.BareMetalInstanceTypesGetRequest_builder{Id: id}.Build())
+			Expect(err).ToNot(HaveOccurred())
+			publicList, err := publicClient.List(ctx, publicv1.BareMetalInstanceTypesListRequest_builder{Filter: &filter}.Build())
+			Expect(err).ToNot(HaveOccurred())
+			Expect(publicList.GetItems()).To(HaveLen(1))
+			expectedHardware, err := protojson.Marshal(original.GetSpec().GetHardware())
+			Expect(err).ToNot(HaveOccurred())
+			for _, object := range []*publicv1.BareMetalInstanceType{publicGet.GetObject(), publicList.GetItems()[0]} {
+				Expect(object.GetId()).To(Equal(id))
+				Expect(object.GetMetadata().GetName()).To(Equal(original.GetMetadata().GetName()))
+				Expect(object.GetMetadata().GetLabels()).To(Equal(original.GetMetadata().GetLabels()))
+				Expect(object.GetMetadata().GetAnnotations()).To(Equal(original.GetMetadata().GetAnnotations()))
+				Expect(proto.Equal(object.GetMetadata().GetCreationTimestamp(), original.GetMetadata().GetCreationTimestamp())).To(BeTrue())
+				Expect(object.GetSpec().GetHardware().GetCpu().GetArchitecture()).To(Equal(architecture))
+				Expect(object.GetSpec().GetDescription()).To(Equal(original.GetSpec().GetDescription()))
+				actualHardware, err := protojson.Marshal(object.GetSpec().GetHardware())
+				Expect(err).ToNot(HaveOccurred())
+				Expect(actualHardware).To(MatchJSON(expectedHardware))
+			}
+		}
 	})
 })

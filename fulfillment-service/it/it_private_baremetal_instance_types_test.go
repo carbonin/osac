@@ -20,7 +20,9 @@ import (
 	. "github.com/onsi/ginkgo/v2/dsl/core"
 	. "github.com/onsi/gomega"
 	grpccodes "google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	grpcstatus "google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
 	"github.com/osac-project/osac/fulfillment-service/internal/uuid"
@@ -862,3 +864,178 @@ func stringPtr(s string) *string {
 func int32Ptr(i int32) *int32 {
 	return &i
 }
+
+var _ = Describe("Private bare metal type architecture", func() {
+	var ctx context.Context
+	var client privatev1.BareMetalInstanceTypesClient
+	architectureMask := &fieldmaskpb.FieldMask{Paths: []string{"spec.hardware.cpu.architecture"}}
+	invalid := []string{"x86_64", "aarch64", "AMD64", "ARM64", "Amd64", " amd64", "amd64 ", "", "ppc64le"}
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		client = privatev1.NewBareMetalInstanceTypesClient(tool.InternalView().AdminConn())
+	})
+	get := func(id string) *privatev1.BareMetalInstanceType {
+		GinkgoHelper()
+		response, err := client.Get(ctx, privatev1.BareMetalInstanceTypesGetRequest_builder{Id: id}.Build())
+		Expect(err).ToNot(HaveOccurred())
+		return response.GetObject()
+	}
+	assertUnchanged := func(original *privatev1.BareMetalInstanceType) {
+		GinkgoHelper()
+		Expect(proto.Equal(get(original.GetId()), original)).To(BeTrue())
+	}
+
+	It("accepts exact canonical Create inputs and validates dry-run without persistence", func() {
+		for _, architecture := range append([]string{"amd64", "arm64", "s390x"}, invalid...) {
+			for _, dryRun := range []bool{false, true} {
+				object := architectureTypeInput()
+				object.GetSpec().GetHardware().GetCpu().SetArchitecture(architecture)
+				id := object.GetMetadata().GetName()
+				operationCtx := ctx
+				if dryRun {
+					operationCtx = metadata.AppendToOutgoingContext(ctx, "x-dry-run", "true")
+				}
+				response, err := client.Create(operationCtx, privatev1.BareMetalInstanceTypesCreateRequest_builder{Object: object}.Build())
+				canonical := architecture == "amd64" || architecture == "arm64" || architecture == "s390x"
+				if canonical {
+					Expect(err).ToNot(HaveOccurred())
+					Expect(response.GetObject().GetId()).To(Equal(id))
+					Expect(response.GetObject().GetSpec().GetHardware().GetCpu().GetArchitecture()).To(Equal(architecture))
+				} else {
+					Expect(grpcstatus.Code(err)).To(Equal(grpccodes.InvalidArgument))
+					Expect(err.Error()).To(ContainSubstring("architecture"))
+					for _, accepted := range []string{"amd64", "arm64", "s390x"} {
+						Expect(err.Error()).To(ContainSubstring(accepted))
+					}
+				}
+				if canonical && !dryRun {
+					DeferCleanup(func() {
+						_, err := client.Delete(context.Background(), privatev1.BareMetalInstanceTypesDeleteRequest_builder{Id: id}.Build())
+						Expect(err).ToNot(HaveOccurred())
+					})
+					Expect(get(id).GetSpec().GetHardware().GetCpu().GetArchitecture()).To(Equal(architecture))
+				} else {
+					_, err = client.Get(ctx, privatev1.BareMetalInstanceTypesGetRequest_builder{Id: id}.Build())
+					Expect(grpcstatus.Code(err)).To(Equal(grpccodes.NotFound))
+					filter := fmt.Sprintf("this.id == '%s'", id)
+					listed, err := client.List(ctx, privatev1.BareMetalInstanceTypesListRequest_builder{Filter: &filter}.Build())
+					Expect(err).ToNot(HaveOccurred())
+					Expect(listed.GetItems()).To(BeEmpty())
+				}
+			}
+		}
+	})
+
+	It("corrects only legacy architecture through nested, ancestor and full updates", func() {
+		for _, architecture := range []string{"amd64", "arm64", "s390x"} {
+			for _, path := range []string{"spec.hardware.cpu.architecture", "spec.hardware.cpu", "spec.hardware", "spec", ""} {
+				original := createLegacyArchitectureType(ctx, client, "x86_64")
+				candidate := proto.Clone(original).(*privatev1.BareMetalInstanceType)
+				candidate.GetSpec().GetHardware().GetCpu().SetArchitecture(architecture)
+				var mask *fieldmaskpb.FieldMask
+				if path != "" {
+					mask = &fieldmaskpb.FieldMask{Paths: []string{path}}
+				} else {
+					candidate.SetMetadata(privatev1.Metadata_builder{Version: original.GetMetadata().GetVersion()}.Build())
+				}
+				_, err := client.Update(ctx, privatev1.BareMetalInstanceTypesUpdateRequest_builder{Object: candidate, UpdateMask: mask, Lock: true}.Build())
+				Expect(err).ToNot(HaveOccurred())
+				stored := get(original.GetId())
+				Expect(stored.GetId()).To(Equal(original.GetId()))
+				Expect(proto.Equal(stored.GetSpec(), candidate.GetSpec())).To(BeTrue())
+				expectedMetadata := proto.Clone(original.GetMetadata()).(*privatev1.Metadata)
+				expectedMetadata.SetVersion(stored.GetMetadata().GetVersion())
+				Expect(proto.Equal(stored.GetMetadata(), expectedMetadata)).To(BeTrue())
+			}
+		}
+	})
+
+	It("preserves legacy storage after invalid replacements, excluded corrections and immutable edits", func() {
+		original := createLegacyArchitectureType(ctx, client, "aarch64")
+		for _, architecture := range invalid {
+			for _, path := range []string{"spec.hardware.cpu.architecture", "spec.hardware.cpu", "spec.hardware", "spec", ""} {
+				candidate := proto.Clone(original).(*privatev1.BareMetalInstanceType)
+				candidate.GetSpec().GetHardware().GetCpu().SetArchitecture(architecture)
+				var mask *fieldmaskpb.FieldMask
+				if path != "" {
+					mask = &fieldmaskpb.FieldMask{Paths: []string{path}}
+				}
+				_, err := client.Update(ctx, privatev1.BareMetalInstanceTypesUpdateRequest_builder{Object: candidate, UpdateMask: mask, Lock: true}.Build())
+				Expect(grpcstatus.Code(err)).To(Equal(grpccodes.InvalidArgument))
+				for _, accepted := range []string{"amd64", "arm64", "s390x"} {
+					Expect(err.Error()).To(ContainSubstring(accepted))
+				}
+				assertUnchanged(original)
+			}
+		}
+		for _, mask := range []*fieldmaskpb.FieldMask{{}, {Paths: []string{"metadata.labels"}}, {Paths: []string{"spec.description"}}} {
+			candidate := proto.Clone(original).(*privatev1.BareMetalInstanceType)
+			candidate.GetSpec().GetHardware().GetCpu().SetArchitecture("arm64")
+			_, err := client.Update(ctx, privatev1.BareMetalInstanceTypesUpdateRequest_builder{Object: candidate, UpdateMask: mask}.Build())
+			Expect(grpcstatus.Code(err)).To(Equal(grpccodes.InvalidArgument))
+			assertUnchanged(original)
+		}
+		for _, field := range []string{"cores", "disks", "capabilities", "name", "tenant", "project"} {
+			for _, full := range []bool{false, true} {
+				candidate := proto.Clone(original).(*privatev1.BareMetalInstanceType)
+				candidate.GetSpec().GetHardware().GetCpu().SetArchitecture("arm64")
+				path := "spec.hardware"
+				switch field {
+				case "cores":
+					candidate.GetSpec().GetHardware().GetCpu().SetCores(16)
+				case "disks":
+					candidate.GetSpec().GetHardware().GetDisks()[0].SetCapacityGb(1024)
+				case "capabilities":
+					candidate.GetSpec().GetHardware().SetCapabilities(map[string]string{"boot": "different"})
+				case "name":
+					candidate.GetMetadata().SetName("different-name")
+					path = "metadata.name"
+				case "tenant":
+					candidate.GetMetadata().SetTenant("different-tenant")
+					path = "metadata.tenant"
+				case "project":
+					candidate.GetMetadata().SetProject("different-project")
+					path = "metadata.project"
+				}
+				mask := &fieldmaskpb.FieldMask{Paths: []string{"spec.hardware.cpu.architecture", path}}
+				if full {
+					mask = nil
+				}
+				_, err := client.Update(ctx, privatev1.BareMetalInstanceTypesUpdateRequest_builder{Object: candidate, UpdateMask: mask, Lock: true}.Build())
+				Expect(err).To(HaveOccurred())
+				assertUnchanged(original)
+			}
+		}
+	})
+
+	It("retains provider authority, original client versions and canonical immutability", func() {
+		original := createLegacyArchitectureType(ctx, client, "x86_64")
+		candidate := proto.Clone(original).(*privatev1.BareMetalInstanceType)
+		candidate.GetSpec().GetHardware().GetCpu().SetArchitecture("arm64")
+		tenantClient := privatev1.NewBareMetalInstanceTypesClient(tool.InternalView().UserConn())
+		_, err := tenantClient.Update(ctx, privatev1.BareMetalInstanceTypesUpdateRequest_builder{Object: candidate, UpdateMask: architectureMask, Lock: true}.Build())
+		Expect(grpcstatus.Code(err)).To(Equal(grpccodes.PermissionDenied))
+		assertUnchanged(original)
+		_, err = client.Update(ctx, privatev1.BareMetalInstanceTypesUpdateRequest_builder{Object: candidate, UpdateMask: architectureMask, Lock: true}.Build())
+		Expect(err).ToNot(HaveOccurred())
+		advanced := get(original.GetId())
+		candidate.GetSpec().GetHardware().GetCpu().SetArchitecture("amd64")
+		_, err = client.Update(ctx, privatev1.BareMetalInstanceTypesUpdateRequest_builder{Object: candidate, UpdateMask: architectureMask, Lock: true}.Build())
+		Expect(grpcstatus.Code(err)).To(Equal(grpccodes.Aborted))
+		assertUnchanged(advanced)
+		candidate = proto.Clone(advanced).(*privatev1.BareMetalInstanceType)
+		candidate.GetSpec().GetHardware().GetCpu().SetArchitecture("s390x")
+		_, err = client.Update(ctx, privatev1.BareMetalInstanceTypesUpdateRequest_builder{Object: candidate, UpdateMask: architectureMask, Lock: true}.Build())
+		Expect(grpcstatus.Code(err)).To(Equal(grpccodes.InvalidArgument))
+		Expect(err.Error()).To(ContainSubstring("immutable"))
+		assertUnchanged(advanced)
+		candidate.SetMetadata(nil)
+		_, err = client.Update(ctx, privatev1.BareMetalInstanceTypesUpdateRequest_builder{Object: candidate, UpdateMask: architectureMask, Lock: true}.Build())
+		Expect(grpcstatus.Code(err)).To(Equal(grpccodes.Aborted))
+		assertUnchanged(advanced)
+		_, err = client.Update(ctx, privatev1.BareMetalInstanceTypesUpdateRequest_builder{Object: advanced, UpdateMask: architectureMask, Lock: true}.Build())
+		Expect(err).ToNot(HaveOccurred())
+		assertUnchanged(advanced)
+	})
+})
