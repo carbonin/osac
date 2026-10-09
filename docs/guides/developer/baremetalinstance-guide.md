@@ -85,6 +85,40 @@ osac create baremetalinstance \
   --ssh-key "$(cat ~/.ssh/id_ed25519.pub)"
 ```
 
+### Instance type architecture
+
+Provider-managed `BareMetalInstanceType` objects use a string at
+`spec.hardware.cpu.architecture`. New writes accept exactly `amd64`, `arm64`,
+or `s390x`. Aliases such as `x86_64` and `aarch64`, case variants, whitespace,
+and empty values are rejected. Existing legacy strings remain visible in
+Get and List responses.
+
+A type specification for an `amd64` machine can use:
+
+```yaml
+spec:
+  hardware:
+    cpu:
+      cores: 8
+      architecture: amd64
+      threads_per_core: 2
+    memory:
+      total_gb: 32
+    network_ports:
+      - name: data-0
+        role: fabric
+        type: Ethernet
+        speed: 25Gbps
+  host_label_selector:
+    match_labels:
+      hardware.profile: compute
+```
+
+`DiskImage.spec.architecture` remains a list of enum values that
+describe image compatibility. Its ProtoJSON representation uses symbols,
+for example `"architecture": ["ARCHITECTURE_AMD64"]`, while the
+type's architecture is the string `"amd64"`.
+
 ## Validation, lifecycle, and deletion
 
 OSAC resolves the DiskImage reference before creating the instance. The

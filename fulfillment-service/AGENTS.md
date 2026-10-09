@@ -66,6 +66,24 @@ server run, use `ginkgo run internal/servers`.
 
 See the [fulfillment-service test tiers and coverage notes](../docs/INTEGRATION-TESTING.md#fulfillment-service).
 
+For BareMetalInstanceType architecture validation or correction changes, run
+the validation suite and the focused type server suites:
+
+```bash
+go test ./internal/validation
+go test ./internal/servers -count=1 -ginkgo.focus='Bare metal type architecture|Private bare metal instance types server|Bare metal instance types server'
+```
+
+The server suites use real disposable PostgreSQL databases with mocked
+tenancy/attribution. The deployed private/public type suites additionally
+exercise real interceptors and authorization. Their legacy fixture helper
+requires `OSAC_IT_NAMESPACE`, Kubernetes exec access, and the dedicated Kind
+environment's bundled PostgreSQL database; the installer runner forwards its
+`NS` explicitly. These suites cover type APIs and storage. Cross-component
+admission and provisioning coverage remains with
+[OSAC-6229](https://redhat.atlassian.net/browse/OSAC-6229) and
+[OSAC-6232](https://redhat.atlassian.net/browse/OSAC-6232).
+
 The installer test target builds, loads, and deploys the current service image.
 It reuses the existing cluster and database. For a full suite run, use a fresh
 environment unless the user agrees to reuse the database. See `README.md` for
