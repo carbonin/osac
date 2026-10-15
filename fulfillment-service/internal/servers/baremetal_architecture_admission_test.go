@@ -1,0 +1,397 @@
+/*
+Copyright (c) 2026 Red Hat Inc.
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the
+License. You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an
+"AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
+specific language governing permissions and limitations under the License.
+*/
+
+package servers
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/jackc/pgx/v5/pgconn"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
+	"google.golang.org/protobuf/types/known/wrapperspb"
+
+	"github.com/osac-project/osac/fulfillment-service/internal/auth"
+	"github.com/osac-project/osac/fulfillment-service/internal/database"
+	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
+	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
+	publicv1 "github.com/osac-project/osac/proto/gen/osac/public/v1"
+)
+
+var _ = Describe("Bare metal architecture admission", func() {
+	var (
+		privateServer    *PrivateBareMetalInstancesServer
+		publicServer     *BareMetalInstancesServer
+		images           *dao.GenericDAO[*privatev1.DiskImage]
+		templates        *dao.GenericDAO[*privatev1.BareMetalInstanceTemplate]
+		catalogServer    *PrivateBareMetalInstanceCatalogItemsServer
+		toPublic         *GenericMapper[*privatev1.BareMetalInstance, *publicv1.BareMetalInstance]
+		toPrivate        *GenericMapper[*publicv1.BareMetalInstance, *privatev1.BareMetalInstance]
+		parameterDefault *anypb.Any
+	)
+	BeforeEach(func() {
+		var err error
+		privateServer, err = NewPrivateBareMetalInstancesServer().SetLogger(logger).SetAttributionLogic(attribution).SetTenancyLogic(tenancy).Build()
+		Expect(err).NotTo(HaveOccurred())
+		publicServer, err = NewBareMetalInstancesServer().SetLogger(logger).SetAttributionLogic(attribution).SetTenancyLogic(tenancy).Build()
+		Expect(err).NotTo(HaveOccurred())
+		catalogServer, err = NewPrivateBareMetalInstanceCatalogItemsServer().SetLogger(logger).SetAttributionLogic(attribution).SetTenancyLogic(tenancy).Build()
+		Expect(err).NotTo(HaveOccurred())
+		toPublic, err = NewGenericMapper[*privatev1.BareMetalInstance, *publicv1.BareMetalInstance]().SetLogger(logger).SetStrict(false).Build()
+		Expect(err).NotTo(HaveOccurred())
+		toPrivate, err = NewGenericMapper[*publicv1.BareMetalInstance, *privatev1.BareMetalInstance]().SetLogger(logger).SetStrict(false).Build()
+		Expect(err).NotTo(HaveOccurred())
+		images, err = dao.NewGenericDAO[*privatev1.DiskImage]().SetLogger(logger).SetTenancyLogic(tenancy).Build()
+		Expect(err).NotTo(HaveOccurred())
+		templates, err = dao.NewGenericDAO[*privatev1.BareMetalInstanceTemplate]().SetLogger(logger).SetTenancyLogic(tenancy).Build()
+		Expect(err).NotTo(HaveOccurred())
+		types, err := dao.NewGenericDAO[*privatev1.BareMetalInstanceType]().SetLogger(logger).SetTenancyLogic(tenancy).Build()
+		Expect(err).NotTo(HaveOccurred())
+		for i, cpu := range []string{"amd64", "arm64", "s390x"} {
+			instanceType := bareMetalInstanceTypeFixture("type-"+cpu, bareMetalNetworkPort("data-0", "fabric"))
+			instanceType.GetSpec().GetHardware().GetCpu().SetArchitecture(cpu)
+			_, err = types.Create().SetObject(instanceType).Do(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = images.Create().SetObject(privatev1.DiskImage_builder{
+				Id:       "image-" + cpu,
+				Metadata: privatev1.Metadata_builder{Name: "image-" + cpu, Tenant: auth.SharedTenant}.Build(),
+				Spec: privatev1.DiskImageSpec_builder{
+					Architecture: []privatev1.Architecture{[]privatev1.Architecture{privatev1.Architecture_ARCHITECTURE_AMD64, privatev1.Architecture_ARCHITECTURE_ARM64, privatev1.Architecture_ARCHITECTURE_S390X}[i]},
+					SourceRef:    "oci://private.example/secret-image",
+					Lifecycle:    privatev1.DiskImageLifecycle_DISK_IMAGE_LIFECYCLE_AVAILABLE,
+				}.Build(),
+			}.Build()).Do(ctx)
+			Expect(err).NotTo(HaveOccurred())
+		}
+		seedTenantDefaultNetworking(testTenant, "", new("netris"))
+		parameterDefault, err = anypb.New(wrapperspb.String("default-layout"))
+		Expect(err).NotTo(HaveOccurred())
+		_, err = templates.Create().SetObject(privatev1.BareMetalInstanceTemplate_builder{
+			Id: "architecture-template", Title: "Architecture template",
+			Metadata:     privatev1.Metadata_builder{Name: "architecture-template", Tenant: testTenant}.Build(),
+			InstanceType: bareMetalInstanceTypeReference("type-amd64"),
+			Parameters: []*privatev1.BareMetalInstanceTemplateParameterDefinition{
+				{Name: "layout", Type: "type.googleapis.com/google.protobuf.StringValue", Default: parameterDefault},
+			},
+		}.Build()).Do(ctx)
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	object := func(name, cpu, image string, byName bool) *privatev1.BareMetalInstance {
+		typeRef := bareMetalInstanceTypeReference("type-" + cpu)
+		imageRef := privatev1.DiskImageReference_builder{Id: "image-" + image, Shared: true}.Build()
+		if byName {
+			typeRef.SetName(typeRef.GetId())
+			typeRef.SetId("")
+			imageRef.SetName(imageRef.GetId())
+			imageRef.SetId("")
+		}
+		return privatev1.BareMetalInstance_builder{
+			Metadata: privatev1.Metadata_builder{Name: name}.Build(),
+			Spec: privatev1.BareMetalInstanceSpec_builder{
+				Template:     privatev1.BareMetalInstanceTemplateReference_builder{Id: "architecture-template"}.Build(),
+				InstanceType: typeRef, DiskImage: imageRef, SshPublicKey: new(testSSHPublicKey),
+			}.Build(),
+		}.Build()
+	}
+	create := func(callCtx context.Context, obj *privatev1.BareMetalInstance, public bool) (*privatev1.BareMetalInstance, []string, error) {
+		if !public {
+			response, err := privateServer.Create(callCtx, privatev1.BareMetalInstancesCreateRequest_builder{Object: obj}.Build())
+			return response.GetObject(), response.GetWarnings(), err
+		}
+		publicObject := &publicv1.BareMetalInstance{}
+		Expect(toPublic.Copy(callCtx, obj, publicObject)).To(Succeed())
+		response, err := publicServer.Create(callCtx, publicv1.BareMetalInstancesCreateRequest_builder{Object: publicObject}.Build())
+		if err != nil {
+			return nil, nil, err
+		}
+		result := &privatev1.BareMetalInstance{}
+		Expect(toPrivate.Copy(callCtx, response.GetObject(), result)).To(Succeed())
+		return result, response.GetWarnings(), nil
+	}
+	assertAbsent := func(name string) {
+		response, err := privateServer.List(ctx, privatev1.BareMetalInstancesListRequest_builder{Filter: new(fmt.Sprintf("this.metadata.name == '%s'", name))}.Build())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(response.GetItems()).To(BeEmpty())
+	}
+	assertMismatch := func(err error) {
+		Expect(status.Code(err)).To(Equal(codes.InvalidArgument))
+		Expect(status.Convert(err).Message()).To(And(
+			HavePrefix("INCOMPATIBLE_DISK_IMAGE_ARCHITECTURE: "),
+			ContainSubstring("supports ["), ContainSubstring("requires "),
+			ContainSubstring("Select a compatible DiskImage or BareMetalInstanceType"),
+			Not(ContainSubstring("resourceClass")), Not(ContainSubstring("oci://")),
+		))
+	}
+
+	DescribeTableSubtree("API", func(public bool) {
+		DescribeTable("compares canonical architectures", func(cpu, image string, dryRun bool) {
+			name := "architecture-request"
+			obj := object(name, cpu, image, false)
+			before := proto.Clone(obj)
+			callCtx := ctx
+			if dryRun {
+				callCtx = dryRunCtx()
+			}
+			result, _, err := create(callCtx, obj, public)
+			if cpu != image {
+				assertMismatch(err)
+				Expect(result).To(BeNil())
+				assertAbsent(name)
+			} else {
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result.GetSpec().GetInstanceType().GetId()).To(Equal("type-" + cpu))
+				Expect(result.GetSpec().GetDiskImage().GetId()).To(Equal("image-" + image))
+				Expect(proto.Equal(result.GetSpec().GetTemplateParameters()["layout"], parameterDefault)).To(BeTrue())
+				if dryRun {
+					assertAbsent(name)
+				} else {
+					stored, readErr := privateServer.Get(ctx, privatev1.BareMetalInstancesGetRequest_builder{Id: result.GetId()}.Build())
+					Expect(readErr).NotTo(HaveOccurred())
+					Expect(stored.GetObject().GetSpec().GetInstanceType().GetId()).To(Equal("type-" + cpu))
+					Expect(stored.GetObject().GetSpec().GetDiskImage().GetId()).To(Equal("image-" + image))
+					Expect(proto.Equal(stored.GetObject().GetSpec().GetTemplateParameters()["layout"], parameterDefault)).To(BeTrue())
+				}
+			}
+			Expect(proto.Equal(obj, before)).To(BeTrue())
+		},
+			Entry("amd64 with amd64", "amd64", "amd64", false),
+			Entry("amd64 with amd64, dry-run", "amd64", "amd64", true),
+			Entry("amd64 with arm64", "amd64", "arm64", false),
+			Entry("amd64 with arm64, dry-run", "amd64", "arm64", true),
+			Entry("amd64 with s390x", "amd64", "s390x", false),
+			Entry("amd64 with s390x, dry-run", "amd64", "s390x", true),
+			Entry("arm64 with amd64", "arm64", "amd64", false),
+			Entry("arm64 with amd64, dry-run", "arm64", "amd64", true),
+			Entry("arm64 with arm64", "arm64", "arm64", false),
+			Entry("arm64 with arm64, dry-run", "arm64", "arm64", true),
+			Entry("arm64 with s390x", "arm64", "s390x", false),
+			Entry("arm64 with s390x, dry-run", "arm64", "s390x", true),
+			Entry("s390x with amd64", "s390x", "amd64", false),
+			Entry("s390x with amd64, dry-run", "s390x", "amd64", true),
+			Entry("s390x with arm64", "s390x", "arm64", false),
+			Entry("s390x with arm64, dry-run", "s390x", "arm64", true),
+			Entry("s390x with s390x", "s390x", "s390x", false),
+			Entry("s390x with s390x, dry-run", "s390x", "s390x", true),
+		)
+		DescribeTable("validates template-provided types and names", func(byName, explicitType, compatible bool) {
+			image := "arm64"
+			if compatible {
+				image = "amd64"
+			}
+			obj := object("reference-request", "amd64", image, byName)
+			if !explicitType {
+				obj.GetSpec().ClearInstanceType()
+			}
+			_, _, err := create(ctx, obj, public)
+			if compatible {
+				Expect(err).NotTo(HaveOccurred())
+			} else {
+				assertMismatch(err)
+				assertAbsent("reference-request")
+			}
+		},
+			Entry("type IDs", false, true, false), Entry("type names", true, true, false),
+			Entry("template ID mismatch", false, false, false), Entry("template name mismatch", true, false, false),
+			Entry("template ID match", false, false, true), Entry("template name match", true, false, true),
+		)
+		DescribeTable("checks every member of a multi-architecture image", func(cpu string, reverse bool) {
+			image, err := images.Get().SetId("image-amd64").Do(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			members := []privatev1.Architecture{privatev1.Architecture_ARCHITECTURE_AMD64, privatev1.Architecture_ARCHITECTURE_ARM64}
+			if reverse {
+				members[0], members[1] = members[1], members[0]
+			}
+			image.GetObject().GetSpec().SetArchitecture(members)
+			_, err = images.Update().SetObject(image.GetObject()).Do(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			_, _, err = create(ctx, object("multi-request", cpu, "amd64", false), public)
+			if cpu == "s390x" {
+				assertMismatch(err)
+				assertAbsent("multi-request")
+			} else {
+				Expect(err).NotTo(HaveOccurred())
+			}
+		}, Entry("amd64", "amd64", false), Entry("arm64", "arm64", false), Entry("s390x", "s390x", false),
+			Entry("amd64 reversed", "amd64", true), Entry("arm64 reversed", "arm64", true), Entry("s390x reversed", "s390x", true))
+
+		DescribeTable("compares effective catalog defaults and overrides", func(locked, override, compatible bool) {
+			image := "arm64"
+			if compatible {
+				image = "amd64"
+			}
+			typePolicy := &privatev1.BareMetalInstanceTypeReferenceFieldPolicy{}
+			imagePolicy := &privatev1.DiskImageReferenceFieldPolicy{}
+			if locked {
+				typePolicy.SetLocked(bareMetalInstanceTypeReference("type-amd64"))
+				imagePolicy.SetLocked(privatev1.DiskImageReference_builder{Id: "image-" + image, Shared: true}.Build())
+			} else {
+				typePolicy.SetEditable(privatev1.EditableBareMetalInstanceTypeReferenceField_builder{DefaultValue: bareMetalInstanceTypeReference("type-amd64")}.Build())
+				imagePolicy.SetEditable(privatev1.EditableDiskImageReferenceField_builder{DefaultValue: privatev1.DiskImageReference_builder{Id: "image-" + image, Shared: true}.Build()}.Build())
+			}
+			catalog, err := catalogServer.Create(ctx, privatev1.BareMetalInstanceCatalogItemsCreateRequest_builder{Object: privatev1.BareMetalInstanceCatalogItem_builder{
+				Metadata: privatev1.Metadata_builder{Name: "architecture-catalog"}.Build(), Title: "Architecture catalog", Published: true,
+				Template: privatev1.BareMetalInstanceTemplateReference_builder{Id: "architecture-template"}.Build(),
+				Fields:   privatev1.BareMetalInstanceCatalogItemFields_builder{InstanceType: typePolicy, DiskImage: imagePolicy}.Build(),
+			}.Build()}.Build())
+			Expect(err).NotTo(HaveOccurred())
+			obj := object("catalog-request", "amd64", image, false)
+			obj.GetSpec().ClearTemplate()
+			obj.GetSpec().SetCatalogItem(privatev1.BareMetalInstanceCatalogItemReference_builder{Id: catalog.GetObject().GetId()}.Build())
+			obj.GetSpec().ClearInstanceType()
+			obj.GetSpec().ClearDiskImage()
+			if override {
+				obj.GetSpec().SetInstanceType(bareMetalInstanceTypeReference("type-arm64"))
+				obj.GetSpec().SetDiskImage(privatev1.DiskImageReference_builder{Id: "image-" + image, Shared: true}.Build())
+				compatible = image == "arm64"
+			}
+			result, _, err := create(ctx, obj, public)
+			if compatible {
+				Expect(err).NotTo(HaveOccurred())
+				expectedType := "type-amd64"
+				if override {
+					expectedType = "type-arm64"
+				}
+				Expect(result.GetSpec().GetInstanceType().GetId()).To(Equal(expectedType))
+				Expect(result.GetSpec().GetDiskImage().GetId()).To(Equal("image-" + image))
+				Expect(proto.Equal(result.GetSpec().GetTemplateParameters()["layout"], parameterDefault)).To(BeTrue())
+			} else {
+				assertMismatch(err)
+				assertAbsent("catalog-request")
+			}
+		}, Entry("locked matching", true, false, true), Entry("locked mismatching", true, false, false),
+			Entry("editable matching", false, false, true), Entry("editable mismatching", false, false, false),
+			Entry("editable compatible override", false, true, false), Entry("editable incompatible override", false, true, true))
+
+		DescribeTable("preserves lifecycle errors and deprecated warnings", func(lifecycle privatev1.DiskImageLifecycle, compatible, deleting bool) {
+			imageName := "arm64"
+			if compatible {
+				imageName = "amd64"
+			}
+			image, err := images.Get().SetId("image-" + imageName).Do(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			image.GetObject().GetSpec().SetLifecycle(lifecycle)
+			if deleting {
+				image.GetObject().GetMetadata().SetFinalizers([]string{"fixture.test/hold"})
+			}
+			_, err = images.Update().SetObject(image.GetObject()).Do(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			if deleting {
+				_, err = images.Delete().SetId(image.GetObject().GetId()).Do(ctx)
+				Expect(err).NotTo(HaveOccurred())
+			}
+			_, warnings, err := create(ctx, object("lifecycle-request", "amd64", imageName, false), public)
+			switch {
+			case deleting:
+				Expect(status.Code(err)).To(Equal(codes.InvalidArgument))
+				Expect(err.Error()).To(ContainSubstring("deleted"))
+				Expect(err.Error()).NotTo(ContainSubstring("INCOMPATIBLE_DISK_IMAGE_ARCHITECTURE"))
+				assertAbsent("lifecycle-request")
+			case lifecycle == privatev1.DiskImageLifecycle_DISK_IMAGE_LIFECYCLE_OBSOLETE:
+				Expect(status.Code(err)).To(Equal(codes.FailedPrecondition))
+				Expect(err.Error()).To(ContainSubstring("obsolete"))
+				assertAbsent("lifecycle-request")
+			case !compatible:
+				assertMismatch(err)
+				assertAbsent("lifecycle-request")
+			default:
+				Expect(err).NotTo(HaveOccurred())
+				Expect(warnings).To(HaveLen(1))
+				Expect(warnings[0]).To(ContainSubstring("deprecated"))
+			}
+		}, Entry("obsolete compatible", privatev1.DiskImageLifecycle_DISK_IMAGE_LIFECYCLE_OBSOLETE, true, false),
+			Entry("obsolete incompatible", privatev1.DiskImageLifecycle_DISK_IMAGE_LIFECYCLE_OBSOLETE, false, false),
+			Entry("deprecated compatible", privatev1.DiskImageLifecycle_DISK_IMAGE_LIFECYCLE_DEPRECATED, true, false),
+			Entry("deprecated incompatible", privatev1.DiskImageLifecycle_DISK_IMAGE_LIFECYCLE_DEPRECATED, false, false),
+			Entry("deleting compatible", privatev1.DiskImageLifecycle_DISK_IMAGE_LIFECYCLE_AVAILABLE, true, true),
+			Entry("deleting incompatible", privatev1.DiskImageLifecycle_DISK_IMAGE_LIFECYCLE_AVAILABLE, false, true))
+	}, Entry("private", false), Entry("public", true))
+
+	DescribeTable("keeps compared catalog resources stable through the request transaction", func(byName bool) {
+		Expect(suiteTx.End(ctx)).To(Succeed())
+		suiteTx = nil
+		managerCtx := database.TxManagerIntoContext(context.Background(), tm)
+		checkLock := func(table, id string, locked bool) {
+			_, err := database.WithNewTx(managerCtx, func(otherCtx context.Context) (bool, error) {
+				tx, err := database.TxFromContext(otherCtx)
+				if err != nil {
+					return false, err
+				}
+				_, err = tx.Exec(otherCtx, "select id from "+table+" where id=$1 for update nowait", id)
+				return true, err
+			})
+			if locked {
+				var pgErr *pgconn.PgError
+				Expect(errors.As(err, &pgErr)).To(BeTrue())
+				Expect(pgErr.Code).To(Equal("55P03"))
+			} else {
+				Expect(err).NotTo(HaveOccurred())
+			}
+		}
+		_, err := database.WithNewTx(managerCtx, func(requestCtx context.Context) (*privatev1.BareMetalInstancesCreateResponse, error) {
+			response, err := privateServer.Create(requestCtx, privatev1.BareMetalInstancesCreateRequest_builder{Object: object("locked-request", "amd64", "amd64", byName)}.Build())
+			if err != nil {
+				return nil, err
+			}
+			checkLock("bare_metal_instance_types", "type-amd64", true)
+			checkLock("disk_images", "image-amd64", true)
+			return response, nil
+		})
+		Expect(err).NotTo(HaveOccurred())
+		checkLock("bare_metal_instance_types", "type-amd64", false)
+		checkLock("disk_images", "image-amd64", false)
+	}, Entry("IDs", false), Entry("names", true))
+
+	DescribeTable("hides unauthorized image architectures", func(byName, compatible bool) {
+		createTenant("hidden-tenant")
+		image, err := images.Get().SetId("image-arm64").Do(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		hidden := privatev1.DiskImage_builder{
+			Id:       "hidden-image",
+			Metadata: privatev1.Metadata_builder{Name: "hidden-image", Tenant: "hidden-tenant"}.Build(),
+			Spec:     proto.Clone(image.GetObject().GetSpec()).(*privatev1.DiskImageSpec),
+		}.Build()
+		if compatible {
+			hidden.GetSpec().SetArchitecture([]privatev1.Architecture{privatev1.Architecture_ARCHITECTURE_AMD64})
+		}
+		_, err = images.Create().SetObject(hidden).Do(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		visibility, err := auth.NewVisibility().AddVisibleTenants(testTenant, auth.SharedTenant).Build()
+		Expect(err).NotTo(HaveOccurred())
+		restricted := auth.NewMockTenancyLogic(ctrl)
+		restricted.EXPECT().DetermineAssignableTenants(gomock.Any()).Return(auth.AllTenants, nil).AnyTimes()
+		restricted.EXPECT().DetermineDefaultTenant(gomock.Any()).Return(testTenant, nil).AnyTimes()
+		restricted.EXPECT().DetermineVisibility(gomock.Any()).Return(visibility, nil).AnyTimes()
+		service, err := NewPrivateBareMetalInstancesServer().SetLogger(logger).SetAttributionLogic(attribution).SetTenancyLogic(restricted).Build()
+		Expect(err).NotTo(HaveOccurred())
+		obj := object("hidden-request", "amd64", "arm64", byName)
+		obj.GetSpec().GetDiskImage().SetShared(false)
+		if byName {
+			obj.GetSpec().GetDiskImage().SetName("hidden-image")
+		} else {
+			obj.GetSpec().GetDiskImage().SetId("hidden-image")
+		}
+		_, err = service.Create(ctx, privatev1.BareMetalInstancesCreateRequest_builder{Object: obj}.Build())
+		Expect(status.Code(err)).To(Equal(codes.NotFound))
+		Expect(err.Error()).NotTo(ContainSubstring("INCOMPATIBLE_DISK_IMAGE_ARCHITECTURE"))
+		Expect(err.Error()).NotTo(ContainSubstring("oci://"))
+		assertAbsent("hidden-request")
+	}, Entry("ID mismatch", false, false), Entry("ID matching", false, true), Entry("name mismatch", true, false), Entry("name matching", true, true))
+})
