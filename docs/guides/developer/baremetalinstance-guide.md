@@ -121,6 +121,9 @@ defaults. This applies to ID and name references. Mismatches return
 `InvalidArgument` with `INCOMPATIBLE_DISK_IMAGE_ARCHITECTURE`; select a compatible
 image or instance type.
 
+DiskImage updates reject removal of an architecture required by an active
+BareMetalInstance or a concrete CatalogItem type/image combination.
+
 ## CatalogItem defaults
 
 CatalogItems express DiskImage policy under `fields.disk_image`; templates do

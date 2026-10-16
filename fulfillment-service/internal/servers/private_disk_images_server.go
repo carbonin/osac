@@ -17,6 +17,8 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
+	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 	grpccodes "google.golang.org/grpc/codes"
@@ -27,6 +29,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
+	"github.com/osac-project/osac/fulfillment-service/internal/database"
 	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
@@ -201,8 +204,68 @@ func (s *PrivateDiskImagesServer) Update(ctx context.Context,
 	request.SetObject(merged)
 	request.GetObject().GetMetadata().SetVersion(clientVersion)
 
-	err = s.generic.Update(ctx, request, &response)
+	err = s.generic.UpdateWithCandidatePreparation(ctx, request, &response, s.validateArchitectureUpdate)
 	return
+}
+
+// validateArchitectureUpdate runs on the final candidate while GenericServer holds the image
+// lock. BMI and catalog admission take the same lock, so no dependent can be admitted between
+// the compatibility check and the image update's commit.
+func (s *PrivateDiskImagesServer) validateArchitectureUpdate(ctx context.Context, current, candidate *privatev1.DiskImage) (err error) {
+	var removed []string
+	for _, architecture := range current.GetSpec().GetArchitecture() {
+		if !slices.Contains(candidate.GetSpec().GetArchitecture(), architecture) {
+			removed = append(removed, strings.ToLower(strings.TrimPrefix(architecture.String(), "ARCHITECTURE_")))
+		}
+	}
+	if len(removed) == 0 {
+		return nil
+	}
+	tx, err := database.TxFromContext(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.ReportError(&err)
+	// Check all tenants, including dependents the shared-image owner cannot list.
+	// Returning only a boolean avoids exposing those resource identities. Catalogs
+	// use their locked/default type, or the template type when no policy overrides it.
+	var inUse bool
+	err = tx.QueryRow(ctx, `
+		select exists (
+			select 1
+			from bare_metal_instances i
+			join bare_metal_instance_types t on t.id = i.data->'spec'->'instance_type'->>'id'
+			where i.deletion_timestamp = 'epoch'
+			  and i.data->'spec'->'disk_image'->>'id' = $1
+			  and t.data->'spec'->'hardware'->'cpu'->>'architecture' = any($2::text[])
+		) or exists (
+			select 1
+			from bare_metal_instance_catalog_items c
+			left join bare_metal_instance_templates template on template.id = c.data->'template'->>'id'
+			join bare_metal_instance_types t on t.id = case
+				when c.data->'fields'->'instance_type' is not null then coalesce(
+					c.data->'fields'->'instance_type'->'locked'->>'id',
+					c.data->'fields'->'instance_type'->'editable'->'default_value'->>'id'
+				)
+				else template.data->'instance_type'->>'id'
+			end
+			where c.deletion_timestamp = 'epoch'
+			  and coalesce(
+				c.data->'fields'->'disk_image'->'locked'->>'id',
+				c.data->'fields'->'disk_image'->'editable'->'default_value'->>'id'
+			  ) = $1
+			  and t.data->'spec'->'hardware'->'cpu'->>'architecture' = any($2::text[])
+		)
+	`, current.GetId(), removed).Scan(&inUse)
+	if err != nil {
+		s.logger.ErrorContext(ctx, "Failed to check disk image architecture dependencies", slog.Any("error", err))
+		return grpcstatus.Error(grpccodes.Internal, "failed to check disk image architecture dependencies")
+	}
+	if inUse {
+		return grpcstatus.Error(grpccodes.FailedPrecondition,
+			"DISK_IMAGE_ARCHITECTURE_IN_USE: cannot remove an architecture required by an existing bare metal instance or catalog item; retain it or replace the dependent resources")
+	}
+	return nil
 }
 
 func (s *PrivateDiskImagesServer) Delete(ctx context.Context,
@@ -233,6 +296,8 @@ func applyDiskImageUpdate(base, update *privatev1.DiskImage, mask *fieldmaskpb.F
 	}
 	for _, path := range mask.GetPaths() {
 		switch path {
+		case "spec":
+			base.SetSpec(proto.Clone(update.GetSpec()).(*privatev1.DiskImageSpec))
 		case "spec.lifecycle":
 			base.GetSpec().SetLifecycle(update.GetSpec().GetLifecycle())
 		case "spec.architecture":

@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	. "github.com/onsi/ginkgo/v2"
@@ -26,6 +27,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
@@ -394,4 +396,80 @@ var _ = Describe("Bare metal architecture admission", func() {
 		Expect(err.Error()).NotTo(ContainSubstring("oci://"))
 		assertAbsent("hidden-request")
 	}, Entry("ID mismatch", false, false), Entry("ID matching", false, true), Entry("name mismatch", true, false), Entry("name matching", true, true))
+	DescribeTable("serializes instance admission and architecture removal", func(createFirst bool) {
+		Expect(suiteTx.End(ctx)).To(Succeed())
+		suiteTx = nil
+		managerCtx, cancel := context.WithTimeout(database.TxManagerIntoContext(context.Background(), tm), 10*time.Second)
+		defer cancel()
+		first := func(callCtx context.Context) error {
+			_, err := privateServer.Create(callCtx, privatev1.BareMetalInstancesCreateRequest_builder{Object: object("concurrent-request", "amd64", "amd64", false)}.Build())
+			return err
+		}
+		imageService, err := NewPrivateDiskImagesServer().SetLogger(logger).SetAttributionLogic(attribution).SetTenancyLogic(tenancy).Build()
+		Expect(err).NotTo(HaveOccurred())
+		second := func(callCtx context.Context) error {
+			_, err := imageService.Update(callCtx, privatev1.DiskImagesUpdateRequest_builder{
+				Object: privatev1.DiskImage_builder{Id: "image-amd64", Spec: privatev1.DiskImageSpec_builder{
+					Architecture: []privatev1.Architecture{privatev1.Architecture_ARCHITECTURE_ARM64},
+				}.Build()}.Build(),
+				UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"spec.architecture"}},
+			}.Build())
+			return err
+		}
+		if !createFirst {
+			first, second = second, first
+		}
+		secondPID := make(chan int, 1)
+		result := make(chan error, 1)
+		_, err = database.WithNewTx(managerCtx, func(firstCtx context.Context) (bool, error) {
+			if err := first(firstCtx); err != nil {
+				return false, err
+			}
+			firstTx, err := database.TxFromContext(firstCtx)
+			Expect(err).NotTo(HaveOccurred())
+			var firstPID int
+			Expect(firstTx.QueryRow(firstCtx, "select pg_backend_pid()").Scan(&firstPID)).To(Succeed())
+			go func() {
+				defer GinkgoRecover()
+				_, err := database.WithNewTx(managerCtx, func(secondCtx context.Context) (bool, error) {
+					tx, err := database.TxFromContext(secondCtx)
+					if err != nil {
+						return false, err
+					}
+					var pid int
+					if err := tx.QueryRow(secondCtx, "select pg_backend_pid()").Scan(&pid); err != nil {
+						return false, err
+					}
+					secondPID <- pid
+					return true, second(secondCtx)
+				})
+				result <- err
+			}()
+			var pid int
+			Eventually(secondPID, 3*time.Second).Should(Receive(&pid))
+			Eventually(func() bool {
+				blocked, err := database.WithNewTx(managerCtx, func(probeCtx context.Context) (bool, error) {
+					tx, err := database.TxFromContext(probeCtx)
+					if err != nil {
+						return false, err
+					}
+					var blocked bool
+					err = tx.QueryRow(probeCtx, "select $1::int = any(pg_blocking_pids($2))", firstPID, pid).Scan(&blocked)
+					return blocked, err
+				})
+				Expect(err).NotTo(HaveOccurred())
+				return blocked
+			}, 3*time.Second, 10*time.Millisecond).Should(BeTrue(), fmt.Sprintf("transaction %d must wait for %d", pid, firstPID))
+			return true, nil
+		})
+		Expect(err).NotTo(HaveOccurred())
+		var secondErr error
+		Eventually(result, 3*time.Second).Should(Receive(&secondErr))
+		if createFirst {
+			Expect(status.Code(secondErr)).To(Equal(codes.FailedPrecondition))
+		} else {
+			Expect(status.Code(secondErr)).To(Equal(codes.InvalidArgument))
+			Expect(secondErr.Error()).To(ContainSubstring("INCOMPATIBLE_DISK_IMAGE_ARCHITECTURE"))
+		}
+	}, Entry("instance admission commits first", true), Entry("image update commits first", false))
 })

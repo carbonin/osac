@@ -24,6 +24,7 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -96,6 +97,19 @@ var _ = Describe("BareMetalInstance architecture admission", Ordered, ContinueOn
 		Expect(err).NotTo(HaveOccurred())
 		image = result.GetObject()
 	}
+	updateImage := func(ctx context.Context, proposed *privatev1.DiskImage, mask *fieldmaskpb.FieldMask, public bool) error {
+		if !public {
+			_, err := images.Update(ctx, privatev1.DiskImagesUpdateRequest_builder{Object: proposed, UpdateMask: mask}.Build())
+			return err
+		}
+		mapper, err := servers.NewGenericMapper[*privatev1.DiskImage, *publicv1.DiskImage]().SetLogger(logger).SetStrict(false).Build()
+		Expect(err).NotTo(HaveOccurred())
+		mapped := &publicv1.DiskImage{}
+		Expect(mapper.Copy(ctx, proposed, mapped)).To(Succeed())
+		client := publicv1.NewDiskImagesClient(tool.ExternalView().AdminConn())
+		_, err = client.Update(ctx, publicv1.DiskImagesUpdateRequest_builder{Object: mapped, UpdateMask: mask}.Build())
+		return err
+	}
 	cleanupInstance := func(id string) {
 		deferCatalogItemFixtureDeletion(func(ctx context.Context) error {
 			_, err := instances.Delete(ctx, privatev1.BareMetalInstancesDeleteRequest_builder{Id: id}.Build())
@@ -156,6 +170,72 @@ var _ = Describe("BareMetalInstance architecture admission", Ordered, ContinueOn
 			Not(ContainSubstring("quay.io")), Not(ContainSubstring("osac.openshift.io/host-type"))))
 	}
 	DescribeTableSubtree("API", func(public bool) {
+		DescribeTable("rejects image changes that invalidate an existing instance", func(ctx context.Context, masked bool) {
+			obj := object()
+			obj.GetSpec().SetUserData("#cloud-config\n")
+			created, _, err := create(ctx, obj, public, false)
+			Expect(err).NotTo(HaveOccurred())
+			before, err := images.Get(ctx, privatev1.DiskImagesGetRequest_builder{Id: image.GetId()}.Build())
+			Expect(err).NotTo(HaveOccurred())
+			proposed := proto.Clone(before.GetObject()).(*privatev1.DiskImage)
+			proposed.GetSpec().SetArchitecture([]privatev1.Architecture{architectures["arm64"]})
+			var mask *fieldmaskpb.FieldMask
+			if masked {
+				mask = catalogItemUpdateMask("spec.architecture")
+			}
+			err = updateImage(ctx, proposed, mask, public)
+			Expect(status.Code(err)).To(Equal(codes.FailedPrecondition))
+			Expect(status.Convert(err).Message()).To(HavePrefix("DISK_IMAGE_ARCHITECTURE_IN_USE:"))
+			after, err := images.Get(ctx, privatev1.DiskImagesGetRequest_builder{Id: image.GetId()}.Build())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(proto.Equal(after.GetObject(), before.GetObject())).To(BeTrue())
+			Expect(get(ctx, created.GetId()).GetSpec().GetDiskImage().GetId()).To(Equal(image.GetId()))
+
+			secret := createCatalogItemUserDataSecretFixture(ctx, usersGroup)
+			change := privatev1.BareMetalInstance_builder{Id: created.GetId(), Spec: privatev1.BareMetalInstanceSpec_builder{
+				UserDataSecret: privatev1.SecretLocalReference_builder{Id: secret}.Build(),
+			}.Build()}.Build()
+			secretMask := catalogItemUpdateMask("spec.user_data", "spec.user_data_secret")
+			if public {
+				mapped := &publicv1.BareMetalInstance{}
+				Expect(toPublic.Copy(ctx, change, mapped)).To(Succeed())
+				_, err = publicInstances.Update(ctx, publicv1.BareMetalInstancesUpdateRequest_builder{Object: mapped, UpdateMask: secretMask}.Build())
+			} else {
+				_, err = instances.Update(ctx, privatev1.BareMetalInstancesUpdateRequest_builder{Object: change, UpdateMask: secretMask}.Build())
+			}
+			Expect(err).NotTo(HaveOccurred())
+			stored := get(ctx, created.GetId())
+			Expect(stored.GetSpec().HasUserData()).To(BeFalse())
+			Expect(stored.GetSpec().GetUserDataSecret().GetId()).To(Equal(secret))
+			setArchitectures(ctx, architectures["amd64"], architectures["arm64"])
+			setArchitectures(ctx, architectures["amd64"])
+		}, Entry("masked update", true), Entry("full update", false))
+
+		DescribeTable("preserves catalog image compatibility without an instance", func(ctx context.Context, locked bool) {
+			ref := privatev1.DiskImageReference_builder{Id: image.GetId(), Shared: true}.Build()
+			policy := &privatev1.DiskImageReferenceFieldPolicy{}
+			if locked {
+				policy.SetLocked(ref)
+			} else {
+				policy.SetEditable(privatev1.EditableDiskImageReferenceField_builder{DefaultValue: ref}.Build())
+			}
+			catalogs := privatev1.NewBareMetalInstanceCatalogItemsClient(tool.InternalView().AdminConn())
+			catalog, err := catalogs.Create(ctx, privatev1.BareMetalInstanceCatalogItemsCreateRequest_builder{Object: privatev1.BareMetalInstanceCatalogItem_builder{
+				Metadata: catalogItemFixtureMetadata(usersGroup, ""), Title: "Protected architecture", Published: true,
+				Template: privatev1.BareMetalInstanceTemplateReference_builder{Id: template, Shared: true}.Build(),
+				Fields:   privatev1.BareMetalInstanceCatalogItemFields_builder{DiskImage: policy}.Build(),
+			}.Build()}.Build())
+			Expect(err).NotTo(HaveOccurred())
+			deferCatalogItemFixtureDeletion(func(ctx context.Context) error {
+				_, err := catalogs.Delete(ctx, privatev1.BareMetalInstanceCatalogItemsDeleteRequest_builder{Id: catalog.GetObject().GetId()}.Build())
+				return err
+			}, nil)
+			proposed := proto.Clone(image).(*privatev1.DiskImage)
+			proposed.GetSpec().SetArchitecture([]privatev1.Architecture{architectures["arm64"]})
+			err = updateImage(ctx, proposed, catalogItemUpdateMask("spec.architecture"), public)
+			Expect(status.Code(err)).To(Equal(codes.FailedPrecondition))
+		}, Entry("locked image and template type", true), Entry("default image and template type", false))
+
 		DescribeTable("compares canonical pairs and references", func(ctx context.Context, cpu, imageCPU string, byName bool) {
 			selected := instanceType
 			if cpu != "amd64" {
