@@ -108,7 +108,11 @@ var _ = DescribeMigration("Canonicalize bare metal type architectures", func() {
 		for id, original := range before {
 			var row map[string]any
 			Expect(json.Unmarshal([]byte(original), &row)).To(Succeed())
-			value := row["data"].(map[string]any)
+			value, ok := row["data"].(map[string]any)
+			if !ok {
+				value = map[string]any{}
+				row["data"] = value
+			}
 			for _, field := range []string{"spec", "hardware", "cpu"} {
 				nested, ok := value[field].(map[string]any)
 				if !ok {
@@ -208,6 +212,41 @@ var _ = DescribeMigration("Canonicalize bare metal type architectures", func() {
 		} {
 			for _, state := range []string{"active", "deleted", "archived"} {
 				seedRow(ctx, fmt.Sprintf("architecture-%s-missing-%d", state, i), data, state)
+			}
+		}
+		before := map[string]map[string]string{}
+		for _, table := range tables {
+			before[table] = snapshot(ctx, conn, table)
+		}
+		Expect(tool.Migrate(ctx, migrationVersion)).To(Succeed())
+		for _, table := range tables {
+			expectMigrated(before[table], snapshot(ctx, conn, table))
+		}
+	})
+
+	It("normalizes non-object architecture parents while preserving unrelated data", func(ctx context.Context) {
+		Expect(seed(ctx, conn)).To(Succeed())
+		var originalData string
+		Expect(conn.QueryRow(ctx, "select data::text from bare_metal_instance_types where id = $1", typeID).
+			Scan(&originalData)).To(Succeed())
+		for depth, path := range [][]string{nil, {"spec"}, {"spec", "hardware"}, {"spec", "hardware", "cpu"}} {
+			for i, parent := range []any{nil, "legacy", 64, true, []any{}, []any{"legacy"}} {
+				var data any
+				Expect(json.Unmarshal([]byte(originalData), &data)).To(Succeed())
+				if len(path) == 0 {
+					data = parent
+				} else {
+					value := data.(map[string]any)
+					for _, field := range path[:len(path)-1] {
+						value = value[field].(map[string]any)
+					}
+					value[path[len(path)-1]] = parent
+				}
+				encoded, err := json.Marshal(data)
+				Expect(err).ToNot(HaveOccurred())
+				for _, state := range []string{"active", "deleted", "archived"} {
+					seedRow(ctx, fmt.Sprintf("architecture-%s-parent-%d-%d", state, depth, i), string(encoded), state)
+				}
 			}
 		}
 		before := map[string]map[string]string{}

@@ -14,19 +14,19 @@
 begin;
 
 update bare_metal_instance_types
-set data = jsonb_set(data, '{spec}',
-  jsonb_set(coalesce(nullif(data->'spec', 'null'::jsonb), '{}'::jsonb), '{hardware}',
-    jsonb_set(coalesce(nullif(data#>'{spec,hardware}', 'null'::jsonb), '{}'::jsonb), '{cpu}',
-      jsonb_set(coalesce(nullif(data#>'{spec,hardware,cpu}', 'null'::jsonb), '{}'::jsonb),
+set data = jsonb_set(case when jsonb_typeof(data) = 'object' then data else '{}'::jsonb end, '{spec}',
+  jsonb_set(case when jsonb_typeof(data->'spec') = 'object' then data->'spec' else '{}'::jsonb end, '{hardware}',
+    jsonb_set(case when jsonb_typeof(data#>'{spec,hardware}') = 'object' then data#>'{spec,hardware}' else '{}'::jsonb end, '{cpu}',
+      jsonb_set(case when jsonb_typeof(data#>'{spec,hardware,cpu}') = 'object' then data#>'{spec,hardware,cpu}' else '{}'::jsonb end,
         '{architecture}', '"amd64"'::jsonb))))
 where coalesce(data#>'{spec,hardware,cpu,architecture}', 'null'::jsonb)
   not in ('"amd64"'::jsonb, '"arm64"'::jsonb, '"s390x"'::jsonb);
 
 update archived_bare_metal_instance_types
-set data = jsonb_set(data, '{spec}',
-  jsonb_set(coalesce(nullif(data->'spec', 'null'::jsonb), '{}'::jsonb), '{hardware}',
-    jsonb_set(coalesce(nullif(data#>'{spec,hardware}', 'null'::jsonb), '{}'::jsonb), '{cpu}',
-      jsonb_set(coalesce(nullif(data#>'{spec,hardware,cpu}', 'null'::jsonb), '{}'::jsonb),
+set data = jsonb_set(case when jsonb_typeof(data) = 'object' then data else '{}'::jsonb end, '{spec}',
+  jsonb_set(case when jsonb_typeof(data->'spec') = 'object' then data->'spec' else '{}'::jsonb end, '{hardware}',
+    jsonb_set(case when jsonb_typeof(data#>'{spec,hardware}') = 'object' then data#>'{spec,hardware}' else '{}'::jsonb end, '{cpu}',
+      jsonb_set(case when jsonb_typeof(data#>'{spec,hardware,cpu}') = 'object' then data#>'{spec,hardware,cpu}' else '{}'::jsonb end,
         '{architecture}', '"amd64"'::jsonb))))
 where coalesce(data#>'{spec,hardware,cpu,architecture}', 'null'::jsonb)
   not in ('"amd64"'::jsonb, '"arm64"'::jsonb, '"s390x"'::jsonb);
