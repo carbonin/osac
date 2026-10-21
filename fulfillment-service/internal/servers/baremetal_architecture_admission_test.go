@@ -142,6 +142,136 @@ var _ = Describe("Bare metal architecture admission", func() {
 			Not(ContainSubstring("resourceClass")), Not(ContainSubstring("oci://")),
 		))
 	}
+	catalogObject := func(typeMode, imageMode, image string, byName bool) *privatev1.BareMetalInstanceCatalogItem {
+		typeRef := bareMetalInstanceTypeReference("type-amd64")
+		imageRef := privatev1.DiskImageReference_builder{Id: "image-" + image, Shared: true}.Build()
+		if byName {
+			typeRef.SetName(typeRef.GetId())
+			typeRef.SetId("")
+			imageRef.SetName(imageRef.GetId())
+			imageRef.SetId("")
+		}
+		fields := &privatev1.BareMetalInstanceCatalogItemFields{}
+		switch typeMode {
+		case "locked":
+			fields.SetInstanceType(privatev1.BareMetalInstanceTypeReferenceFieldPolicy_builder{Locked: typeRef}.Build())
+		case "default":
+			fields.SetInstanceType(privatev1.BareMetalInstanceTypeReferenceFieldPolicy_builder{Editable: privatev1.EditableBareMetalInstanceTypeReferenceField_builder{DefaultValue: typeRef}.Build()}.Build())
+		case "input":
+			fields.SetInstanceType(privatev1.BareMetalInstanceTypeReferenceFieldPolicy_builder{Editable: privatev1.EditableBareMetalInstanceTypeReferenceField_builder{}.Build()}.Build())
+		}
+		switch imageMode {
+		case "locked":
+			fields.SetDiskImage(privatev1.DiskImageReferenceFieldPolicy_builder{Locked: imageRef}.Build())
+		case "default":
+			fields.SetDiskImage(privatev1.DiskImageReferenceFieldPolicy_builder{Editable: privatev1.EditableDiskImageReferenceField_builder{DefaultValue: imageRef}.Build()}.Build())
+		case "input":
+			fields.SetDiskImage(privatev1.DiskImageReferenceFieldPolicy_builder{Editable: privatev1.EditableDiskImageReferenceField_builder{}.Build()}.Build())
+		}
+		return privatev1.BareMetalInstanceCatalogItem_builder{
+			Metadata: privatev1.Metadata_builder{Name: "architecture-catalog"}.Build(), Title: "Architecture catalog", Published: true,
+			Template: privatev1.BareMetalInstanceTemplateReference_builder{Id: "architecture-template"}.Build(), Fields: fields,
+		}.Build()
+	}
+
+	DescribeTableSubtree("Catalog API", func(public bool) {
+		createCatalog := func(callCtx context.Context, item *privatev1.BareMetalInstanceCatalogItem) error {
+			if !public {
+				_, err := catalogServer.Create(callCtx, privatev1.BareMetalInstanceCatalogItemsCreateRequest_builder{Object: item}.Build())
+				return err
+			}
+			server, err := NewBareMetalInstanceCatalogItemsServer().SetLogger(logger).SetAttributionLogic(attribution).SetTenancyLogic(tenancy).Build()
+			Expect(err).NotTo(HaveOccurred())
+			mapper, err := NewGenericMapper[*privatev1.BareMetalInstanceCatalogItem, *publicv1.BareMetalInstanceCatalogItem]().SetLogger(logger).SetStrict(false).Build()
+			Expect(err).NotTo(HaveOccurred())
+			mapped := &publicv1.BareMetalInstanceCatalogItem{}
+			Expect(mapper.Copy(callCtx, item, mapped)).To(Succeed())
+			_, err = server.Create(callCtx, publicv1.BareMetalInstanceCatalogItemsCreateRequest_builder{Object: mapped}.Build())
+			return err
+		}
+		DescribeTable("validates concrete catalog combinations", func(typeMode, imageMode, image string, byName, dryRun bool) {
+			item := catalogObject(typeMode, imageMode, image, byName)
+			before := proto.Clone(item)
+			callCtx := ctx
+			if dryRun {
+				callCtx = dryRunCtx()
+			}
+			err := createCatalog(callCtx, item)
+			rejected := image != "amd64" && typeMode != "input" && imageMode != "input" && imageMode != "absent"
+			if rejected {
+				assertMismatch(err)
+			} else {
+				Expect(err).NotTo(HaveOccurred())
+			}
+			stored, err := catalogServer.List(ctx, privatev1.BareMetalInstanceCatalogItemsListRequest_builder{}.Build())
+			Expect(err).NotTo(HaveOccurred())
+			if rejected || dryRun {
+				Expect(stored.GetItems()).To(BeEmpty())
+			} else {
+				Expect(stored.GetItems()).To(HaveLen(1))
+			}
+			Expect(proto.Equal(item, before)).To(BeTrue())
+		},
+			Entry("locked match", "locked", "locked", "amd64", false, false),
+			Entry("default match", "default", "default", "amd64", false, false),
+			Entry("locked mismatch", "locked", "locked", "arm64", false, false),
+			Entry("default mismatch", "default", "default", "arm64", false, false),
+			Entry("locked type and default image mismatch", "locked", "default", "s390x", false, false),
+			Entry("default type and locked image mismatch", "default", "locked", "arm64", false, false),
+			Entry("template type match", "template", "default", "amd64", false, false),
+			Entry("template type mismatch", "template", "locked", "arm64", false, false),
+			Entry("name match", "locked", "locked", "amd64", true, false),
+			Entry("name mismatch", "default", "default", "arm64", true, false),
+			Entry("dry-run match", "locked", "locked", "amd64", false, true),
+			Entry("dry-run mismatch", "locked", "locked", "arm64", false, true),
+			Entry("caller selects type", "input", "locked", "arm64", false, false),
+			Entry("caller selects image", "locked", "input", "arm64", false, false),
+			Entry("image omitted", "locked", "absent", "arm64", false, false),
+		)
+		It("rejects an incompatible unpublished catalog item", func() {
+			item := catalogObject("locked", "locked", "arm64", false)
+			item.SetPublished(false)
+			assertMismatch(createCatalog(ctx, item))
+		})
+		DescribeTable("uses the catalog type instead of the template type", func(compatible bool) {
+			image := "amd64"
+			if compatible {
+				image = "arm64"
+			}
+			item := catalogObject("locked", "locked", image, false)
+			item.GetFields().GetInstanceType().SetLocked(bareMetalInstanceTypeReference("type-arm64"))
+			err := createCatalog(ctx, item)
+			if compatible {
+				Expect(err).NotTo(HaveOccurred())
+			} else {
+				assertMismatch(err)
+			}
+		}, Entry("matching catalog type", true), Entry("mismatching catalog type", false))
+		It("accepts a matching member of a multi-architecture image", func() {
+			image, err := images.Get().SetId("image-arm64").Do(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			image.GetObject().GetSpec().SetArchitecture([]privatev1.Architecture{privatev1.Architecture_ARCHITECTURE_ARM64, privatev1.Architecture_ARCHITECTURE_AMD64})
+			_, err = images.Update().SetObject(image.GetObject()).Do(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(createCatalog(ctx, catalogObject("locked", "default", "arm64", false))).To(Succeed())
+		})
+	}, Entry("private", false), Entry("public", true))
+
+	DescribeTable("checks merged catalog updates and preserves the stored item on rejection", func(field string) {
+		created, err := catalogServer.Create(ctx, privatev1.BareMetalInstanceCatalogItemsCreateRequest_builder{Object: catalogObject("locked", "default", "amd64", false)}.Build())
+		Expect(err).NotTo(HaveOccurred())
+		update := privatev1.BareMetalInstanceCatalogItem_builder{Id: created.GetObject().GetId(), Fields: &privatev1.BareMetalInstanceCatalogItemFields{}}.Build()
+		if field == "fields.instance_type" {
+			update.GetFields().SetInstanceType(privatev1.BareMetalInstanceTypeReferenceFieldPolicy_builder{Locked: bareMetalInstanceTypeReference("type-arm64")}.Build())
+		} else {
+			update.GetFields().SetDiskImage(privatev1.DiskImageReferenceFieldPolicy_builder{Locked: privatev1.DiskImageReference_builder{Id: "image-arm64", Shared: true}.Build()}.Build())
+		}
+		_, err = catalogServer.Update(ctx, privatev1.BareMetalInstanceCatalogItemsUpdateRequest_builder{Object: update, UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{field}}}.Build())
+		assertMismatch(err)
+		stored, err := catalogServer.Get(ctx, privatev1.BareMetalInstanceCatalogItemsGetRequest_builder{Id: created.GetObject().GetId()}.Build())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(proto.Equal(stored.GetObject(), created.GetObject())).To(BeTrue())
+	}, Entry("instance type only", "fields.instance_type"), Entry("disk image only", "fields.disk_image"))
 
 	DescribeTableSubtree("API", func(public bool) {
 		DescribeTable("compares canonical architectures", func(cpu, image string, dryRun bool) {
@@ -248,11 +378,12 @@ var _ = Describe("Bare metal architecture admission", func() {
 				typePolicy.SetEditable(privatev1.EditableBareMetalInstanceTypeReferenceField_builder{DefaultValue: bareMetalInstanceTypeReference("type-amd64")}.Build())
 				imagePolicy.SetEditable(privatev1.EditableDiskImageReferenceField_builder{DefaultValue: privatev1.DiskImageReference_builder{Id: "image-" + image, Shared: true}.Build()}.Build())
 			}
-			catalog, err := catalogServer.Create(ctx, privatev1.BareMetalInstanceCatalogItemsCreateRequest_builder{Object: privatev1.BareMetalInstanceCatalogItem_builder{
-				Metadata: privatev1.Metadata_builder{Name: "architecture-catalog"}.Build(), Title: "Architecture catalog", Published: true,
+			// Bypass catalog admission to retain coverage for legacy incompatible offerings.
+			catalog, err := catalogServer.generic.dao.Create().SetObject(privatev1.BareMetalInstanceCatalogItem_builder{
+				Metadata: privatev1.Metadata_builder{Name: "architecture-catalog", Tenant: testTenant}.Build(), Title: "Architecture catalog", Published: true,
 				Template: privatev1.BareMetalInstanceTemplateReference_builder{Id: "architecture-template"}.Build(),
 				Fields:   privatev1.BareMetalInstanceCatalogItemFields_builder{InstanceType: typePolicy, DiskImage: imagePolicy}.Build(),
-			}.Build()}.Build())
+			}.Build()).Do(ctx)
 			Expect(err).NotTo(HaveOccurred())
 			obj := object("catalog-request", "amd64", image, false)
 			obj.GetSpec().ClearTemplate()

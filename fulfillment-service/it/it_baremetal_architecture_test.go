@@ -310,11 +310,21 @@ var _ = Describe("BareMetalInstance architecture admission", Ordered, ContinueOn
 				imagePolicy.SetEditable(privatev1.EditableDiskImageReferenceField_builder{DefaultValue: imageRef}.Build())
 			}
 			catalogs := privatev1.NewBareMetalInstanceCatalogItemsClient(tool.InternalView().AdminConn())
-			catalog, err := catalogs.Create(ctx, privatev1.BareMetalInstanceCatalogItemsCreateRequest_builder{Object: privatev1.BareMetalInstanceCatalogItem_builder{
+			item := privatev1.BareMetalInstanceCatalogItem_builder{
 				Metadata: catalogItemFixtureMetadata(usersGroup, ""), Title: "Architecture admission", Published: true,
 				Template: privatev1.BareMetalInstanceTemplateReference_builder{Id: template, Shared: true}.Build(),
 				Fields:   privatev1.BareMetalInstanceCatalogItemFields_builder{InstanceType: typePolicy, DiskImage: imagePolicy}.Build(),
-			}.Build()}.Build())
+			}.Build()
+			catalog, err := catalogs.Create(ctx, privatev1.BareMetalInstanceCatalogItemsCreateRequest_builder{Object: item}.Build())
+			if !compatible {
+				expectMismatch(err)
+				stored, listErr := catalogs.List(ctx, privatev1.BareMetalInstanceCatalogItemsListRequest_builder{
+					Filter: new(fmt.Sprintf("this.metadata.name == '%s'", item.GetMetadata().GetName())),
+				}.Build())
+				Expect(listErr).NotTo(HaveOccurred())
+				Expect(stored.GetItems()).To(BeEmpty())
+				return
+			}
 			Expect(err).NotTo(HaveOccurred())
 			deferCatalogItemFixtureDeletion(func(ctx context.Context) error {
 				_, err := catalogs.Delete(ctx, privatev1.BareMetalInstanceCatalogItemsDeleteRequest_builder{Id: catalog.GetObject().GetId()}.Build())
@@ -342,7 +352,7 @@ var _ = Describe("BareMetalInstance architecture admission", Ordered, ContinueOn
 			}
 		}, Entry("locked match", true, false, true), Entry("locked mismatch", true, false, false),
 			Entry("editable match", false, false, true), Entry("editable mismatch", false, false, false),
-			Entry("compatible override", false, true, false), Entry("incompatible override", false, true, true))
+			Entry("incompatible override", false, true, true))
 
 		DescribeTable("rejects without an admitted identity or CR while reconciliation is active", func(ctx context.Context, byName, dryRun bool) {
 			control, _, err := create(ctx, object(), public, false)
