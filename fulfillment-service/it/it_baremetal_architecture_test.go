@@ -171,6 +171,8 @@ var _ = Describe("BareMetalInstance architecture admission", Ordered, ContinueOn
 	}
 	DescribeTableSubtree("API", func(public bool) {
 		DescribeTable("rejects image changes that invalidate an existing instance", func(ctx context.Context, masked bool) {
+			// Register Secret cleanup first so the dependent instance is removed before it.
+			secret := createCatalogItemUserDataSecretFixture(ctx, usersGroup)
 			obj := object()
 			obj.GetSpec().SetUserDataSource(privatev1.UserDataSource_builder{Inline: new("#cloud-config\n")}.Build())
 			created, _, err := create(ctx, obj, public, false)
@@ -191,7 +193,6 @@ var _ = Describe("BareMetalInstance architecture admission", Ordered, ContinueOn
 			Expect(proto.Equal(after.GetObject(), before.GetObject())).To(BeTrue())
 			Expect(get(ctx, created.GetId()).GetSpec().GetDiskImage().GetId()).To(Equal(image.GetId()))
 
-			secret := createCatalogItemUserDataSecretFixture(ctx, usersGroup)
 			change := privatev1.BareMetalInstance_builder{Id: created.GetId(), Spec: privatev1.BareMetalInstanceSpec_builder{
 				UserDataSource: privatev1.UserDataSource_builder{Secret: privatev1.SecretLocalReference_builder{Id: secret}.Build()}.Build(),
 			}.Build()}.Build()
