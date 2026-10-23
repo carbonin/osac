@@ -124,6 +124,11 @@ image or instance type.
 DiskImage updates reject removal of an architecture required by an active
 BareMetalInstance or a concrete CatalogItem type/image combination.
 
+Template instance-type updates return `FailedPrecondition` with
+`INCOMPATIBLE_DISK_IMAGE_ARCHITECTURE` if an active CatalogItem inherits that
+type and its locked or default DiskImage does not support the new architecture.
+Compatible type changes and descriptive template edits remain supported.
+
 ## CatalogItem defaults
 
 CatalogItems express DiskImage policy under `fields.disk_image`; templates do

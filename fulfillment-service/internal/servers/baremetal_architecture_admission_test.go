@@ -174,6 +174,201 @@ var _ = Describe("Bare metal architecture admission", func() {
 		}.Build()
 	}
 
+	Describe("Template API", func() {
+		var service *PrivateBareMetalInstanceTemplatesServer
+		var original *privatev1.BareMetalInstanceTemplate
+		BeforeEach(func() {
+			var err error
+			service, err = NewPrivateBareMetalInstanceTemplatesServer().SetLogger(logger).SetAttributionLogic(attribution).SetTenancyLogic(tenancy).Build()
+			Expect(err).NotTo(HaveOccurred())
+			response, err := service.Create(ctx, privatev1.BareMetalInstanceTemplatesCreateRequest_builder{
+				Object: privatev1.BareMetalInstanceTemplate_builder{
+					Id: "architecture_update_template", Title: "Architecture template",
+					InstanceType: bareMetalInstanceTypeReference("type-amd64"),
+				}.Build(),
+			}.Build())
+			Expect(err).NotTo(HaveOccurred())
+			original = response.GetObject()
+		})
+		DescribeTable("validates inherited catalog images before changing the type", func(typeMode, imageMode string, multiarch, deleting, published, masked, byName, rejected bool) {
+			if multiarch {
+				image, err := images.Get().SetId("image-amd64").Do(ctx)
+				Expect(err).NotTo(HaveOccurred())
+				image.GetObject().GetSpec().SetArchitecture([]privatev1.Architecture{privatev1.Architecture_ARCHITECTURE_AMD64, privatev1.Architecture_ARCHITECTURE_ARM64})
+				_, err = images.Update().SetObject(image.GetObject()).Do(ctx)
+				Expect(err).NotTo(HaveOccurred())
+			}
+			item := catalogObject(typeMode, imageMode, "amd64", false)
+			item.SetTemplate(privatev1.BareMetalInstanceTemplateReference_builder{Id: original.GetId()}.Build())
+			item.SetPublished(published)
+			if deleting {
+				item.GetMetadata().SetFinalizers([]string{"fixture.test/hold"})
+			}
+			catalog, err := catalogServer.Create(ctx, privatev1.BareMetalInstanceCatalogItemsCreateRequest_builder{Object: item}.Build())
+			Expect(err).NotTo(HaveOccurred())
+			if deleting {
+				_, err = catalogServer.Delete(ctx, privatev1.BareMetalInstanceCatalogItemsDeleteRequest_builder{Id: catalog.GetObject().GetId()}.Build())
+				Expect(err).NotTo(HaveOccurred())
+			}
+			candidate := proto.Clone(original).(*privatev1.BareMetalInstanceTemplate)
+			ref := bareMetalInstanceTypeReference("type-arm64")
+			if byName {
+				ref.SetName("type-arm64")
+				ref.SetId("")
+			}
+			candidate.SetInstanceType(ref)
+			candidate.SetTitle("Updated title")
+			request := privatev1.BareMetalInstanceTemplatesUpdateRequest_builder{Object: candidate}.Build()
+			if masked {
+				request.SetUpdateMask(&fieldmaskpb.FieldMask{Paths: []string{"instance_type", "title"}})
+			}
+			response, err := service.Update(ctx, request)
+			stored, getErr := service.Get(ctx, privatev1.BareMetalInstanceTemplatesGetRequest_builder{Id: original.GetId()}.Build())
+			Expect(getErr).NotTo(HaveOccurred())
+			if rejected {
+				Expect(status.Code(err)).To(Equal(codes.FailedPrecondition))
+				Expect(status.Convert(err).Message()).To(And(HavePrefix("INCOMPATIBLE_DISK_IMAGE_ARCHITECTURE:"),
+					Not(ContainSubstring(catalog.GetObject().GetId())), Not(ContainSubstring("oci://"))))
+				Expect(proto.Equal(stored.GetObject(), original)).To(BeTrue(), "rejected changes must preserve all fields and the version")
+			} else {
+				Expect(err).NotTo(HaveOccurred())
+				Expect(response.GetObject().GetInstanceType().GetId()).To(Equal("type-arm64"))
+				Expect(proto.Equal(stored.GetObject(), response.GetObject())).To(BeTrue())
+			}
+		},
+			Entry("inherited type and locked image", "absent", "locked", false, false, true, false, false, true),
+			Entry("masked inherited type and image default", "absent", "default", false, false, true, true, false, true),
+			Entry("type resolved by name", "absent", "locked", false, false, true, true, true, true),
+			Entry("unpublished catalog is protected", "absent", "locked", false, false, false, true, false, true),
+			Entry("compatible multiarch image", "absent", "locked", true, false, true, true, false, false),
+			Entry("compatible name reference is canonicalized", "absent", "default", true, false, true, true, true, false),
+			Entry("locked type overrides template", "locked", "locked", false, false, true, true, false, false),
+			Entry("default type overrides template", "default", "default", false, false, true, true, false, false),
+			Entry("open type overrides template", "input", "locked", false, false, true, true, false, false),
+			Entry("open image is selected at admission", "absent", "input", false, false, true, true, false, false),
+			Entry("deleted catalog is ignored", "absent", "locked", false, true, true, true, false, false))
+
+		It("allows descriptive edits without revalidating legacy incompatible catalogs", func() {
+			item := catalogObject("absent", "locked", "arm64", false)
+			item.GetMetadata().SetTenant(testTenant)
+			item.SetTemplate(privatev1.BareMetalInstanceTemplateReference_builder{Id: original.GetId()}.Build())
+			_, err := catalogServer.generic.dao.Create().SetObject(item).Do(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			response, err := service.Update(ctx, privatev1.BareMetalInstanceTemplatesUpdateRequest_builder{
+				Object:     privatev1.BareMetalInstanceTemplate_builder{Id: original.GetId(), Title: "Updated title"}.Build(),
+				UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"title"}},
+			}.Build())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(response.GetObject().GetTitle()).To(Equal("Updated title"))
+			Expect(proto.Equal(response.GetObject().GetInstanceType(), original.GetInstanceType())).To(BeTrue())
+		})
+
+		It("protects inherited catalogs in tenants the template owner cannot list", func() {
+			createTenant("hidden-tenant")
+			shared := proto.Clone(original).(*privatev1.BareMetalInstanceTemplate)
+			shared.SetId("shared_architecture_template")
+			shared.SetMetadata(privatev1.Metadata_builder{Name: "shared-architecture-template", Tenant: auth.SharedTenant}.Build())
+			response, err := service.Create(ctx, privatev1.BareMetalInstanceTemplatesCreateRequest_builder{Object: shared}.Build())
+			Expect(err).NotTo(HaveOccurred())
+			shared = response.GetObject()
+			item := catalogObject("absent", "locked", "amd64", false)
+			item.GetMetadata().SetTenant("hidden-tenant")
+			item.SetTemplate(privatev1.BareMetalInstanceTemplateReference_builder{Id: shared.GetId(), Shared: true}.Build())
+			catalog, err := catalogServer.Create(ctx, privatev1.BareMetalInstanceCatalogItemsCreateRequest_builder{Object: item}.Build())
+			Expect(err).NotTo(HaveOccurred())
+			visibility, err := auth.NewVisibility().AddVisibleTenants(testTenant, auth.SharedTenant).Build()
+			Expect(err).NotTo(HaveOccurred())
+			restricted := auth.NewMockTenancyLogic(ctrl)
+			restricted.EXPECT().DetermineVisibility(gomock.Any()).Return(visibility, nil).AnyTimes()
+			restricted.EXPECT().DetermineAssignableTenants(gomock.Any()).Return(auth.AllTenants, nil).AnyTimes()
+			restrictedService, err := NewPrivateBareMetalInstanceTemplatesServer().SetLogger(logger).SetAttributionLogic(attribution).SetTenancyLogic(restricted).Build()
+			Expect(err).NotTo(HaveOccurred())
+			_, err = restrictedService.Update(ctx, privatev1.BareMetalInstanceTemplatesUpdateRequest_builder{
+				Object:     privatev1.BareMetalInstanceTemplate_builder{Id: shared.GetId(), InstanceType: bareMetalInstanceTypeReference("type-arm64")}.Build(),
+				UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"instance_type"}},
+			}.Build())
+			Expect(status.Code(err)).To(Equal(codes.FailedPrecondition))
+			Expect(status.Convert(err).Message()).NotTo(Or(ContainSubstring("hidden-tenant"), ContainSubstring(catalog.GetObject().GetId()), ContainSubstring("oci://")))
+			stored, err := service.Get(ctx, privatev1.BareMetalInstanceTemplatesGetRequest_builder{Id: shared.GetId()}.Build())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(proto.Equal(stored.GetObject(), shared)).To(BeTrue())
+		})
+
+		It("rechecks image architectures after waiting for a concurrent image update", func() {
+			image, err := images.Get().SetId("image-amd64").Do(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			image.GetObject().GetSpec().SetArchitecture([]privatev1.Architecture{privatev1.Architecture_ARCHITECTURE_AMD64, privatev1.Architecture_ARCHITECTURE_ARM64})
+			_, err = images.Update().SetObject(image.GetObject()).Do(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			item := catalogObject("absent", "locked", "amd64", false)
+			item.SetTemplate(privatev1.BareMetalInstanceTemplateReference_builder{Id: original.GetId()}.Build())
+			_, err = catalogServer.Create(ctx, privatev1.BareMetalInstanceCatalogItemsCreateRequest_builder{Object: item}.Build())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(suiteTx.End(ctx)).To(Succeed())
+			suiteTx = nil
+			callCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			DeferCleanup(cancel)
+			writer, err := tm.Begin(callCtx)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() {
+				cancel()
+				if writer != nil {
+					Expect(writer.End(context.Background())).To(Succeed())
+				}
+			})
+			imageService, err := NewPrivateDiskImagesServer().SetLogger(logger).SetAttributionLogic(attribution).SetTenancyLogic(tenancy).Build()
+			Expect(err).NotTo(HaveOccurred())
+			_, err = imageService.Update(database.TxIntoContext(callCtx, writer), privatev1.DiskImagesUpdateRequest_builder{
+				Object: privatev1.DiskImage_builder{Id: "image-amd64", Spec: privatev1.DiskImageSpec_builder{
+					Architecture: []privatev1.Architecture{privatev1.Architecture_ARCHITECTURE_AMD64},
+				}.Build()}.Build(), UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"spec.architecture"}},
+			}.Build())
+			Expect(err).NotTo(HaveOccurred())
+			reader, err := tm.Begin(callCtx)
+			Expect(err).NotTo(HaveOccurred())
+			readerCtx := database.TxIntoContext(callCtx, reader)
+			var pid int
+			Expect(reader.QueryRow(readerCtx, "select pg_backend_pid()").Scan(&pid)).To(Succeed())
+			result := make(chan error, 1)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				defer GinkgoRecover()
+				_, updateErr := service.Update(readerCtx, privatev1.BareMetalInstanceTemplatesUpdateRequest_builder{
+					Object:     privatev1.BareMetalInstanceTemplate_builder{Id: original.GetId(), InstanceType: bareMetalInstanceTypeReference("type-arm64")}.Build(),
+					UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"instance_type"}},
+				}.Build())
+				reader.ReportError(&updateErr)
+				Expect(reader.End(context.Background())).To(Succeed())
+				result <- updateErr
+			}()
+			DeferCleanup(func() {
+				cancel()
+				Eventually(done, 5*time.Second).Should(BeClosed())
+			})
+			Eventually(func() (bool, error) {
+				var waiting bool
+				err := testPool.QueryRow(callCtx, "select exists (select 1 from pg_stat_activity where pid=$1 and wait_event_type='Lock')", pid).Scan(&waiting)
+				return waiting, err
+			}, 10*time.Second, 10*time.Millisecond).Should(BeTrue())
+			Expect(writer.End(callCtx)).To(Succeed())
+			writer = nil
+			var updateErr error
+			Eventually(result, 10*time.Second).Should(Receive(&updateErr))
+			Expect(status.Code(updateErr)).To(Equal(codes.FailedPrecondition))
+			managerCtx := database.TxManagerIntoContext(callCtx, tm)
+			_, err = database.WithNewTx(managerCtx, func(checkCtx context.Context) (bool, error) {
+				stored, err := service.Get(checkCtx, privatev1.BareMetalInstanceTemplatesGetRequest_builder{Id: original.GetId()}.Build())
+				if err != nil {
+					return false, err
+				}
+				Expect(proto.Equal(stored.GetObject(), original)).To(BeTrue())
+				return true, nil
+			})
+			Expect(err).NotTo(HaveOccurred())
+		})
+	})
+
 	DescribeTableSubtree("Catalog API", func(public bool) {
 		createCatalog := func(callCtx context.Context, item *privatev1.BareMetalInstanceCatalogItem) error {
 			if !public {
