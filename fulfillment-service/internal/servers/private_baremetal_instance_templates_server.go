@@ -17,7 +17,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 	grpccodes "google.golang.org/grpc/codes"
@@ -172,7 +171,7 @@ func (s *PrivateBareMetalInstanceTemplatesServer) validateArchitectureUpdate(
 	if err := validateResourceNotDeleted("bare metal instance type", refKey(ref), source, instanceType.GetMetadata()); err != nil {
 		return err
 	}
-	conflicts, err := bareMetalTemplateArchitectureConflicts(ctx, current.GetId(), instanceType.GetSpec().GetHardware().GetCpu().GetArchitecture())
+	conflicts, err := dao.BareMetalTemplateArchitectureConflicts(ctx, current.GetId(), instanceType.GetSpec().GetHardware().GetCpu().GetArchitecture())
 	if err != nil {
 		s.logger.ErrorContext(ctx, "Failed to check template architecture dependencies")
 		return grpcstatus.Error(grpccodes.Internal, "failed to check template architecture dependencies")
@@ -194,50 +193,5 @@ func (s *PrivateBareMetalInstanceTemplatesServer) Delete(ctx context.Context,
 func (s *PrivateBareMetalInstanceTemplatesServer) Signal(ctx context.Context,
 	request *privatev1.BareMetalInstanceTemplatesSignalRequest) (response *privatev1.BareMetalInstanceTemplatesSignalResponse, err error) {
 	err = s.generic.Signal(ctx, request, &response)
-	return
-}
-
-// bareMetalTemplateArchitectureConflicts checks every active catalog that inherits the
-// template's type, including catalogs in other tenants. The caller must hold the template
-// and candidate type locks. Image locks serialize this check with architecture removals.
-func bareMetalTemplateArchitectureConflicts(ctx context.Context, templateID, architecture string) (conflicts bool, err error) {
-	tx, err := database.TxFromContext(ctx)
-	if err != nil {
-		return
-	}
-	defer tx.ReportError(&err)
-
-	// Lock first, then read the architectures in a new statement so a concurrent image
-	// update that held a lock is visible after it commits.
-	_, err = tx.Exec(ctx, `
-		select i.id from disk_images i
-		where exists (
-			select 1 from bare_metal_instance_catalog_items c
-			where c.deletion_timestamp = 'epoch'
-			  and c.data->'template'->>'id' = $1
-			  and c.data->'fields'->'instance_type' is null
-			  and coalesce(
-				c.data->'fields'->'disk_image'->'locked'->>'id',
-				c.data->'fields'->'disk_image'->'editable'->'default_value'->>'id'
-			  ) = i.id
-		)
-		order by i.id for update
-	`, templateID)
-	if err != nil {
-		return
-	}
-	err = tx.QueryRow(ctx, `
-		select exists (
-			select 1 from bare_metal_instance_catalog_items c
-			join disk_images i on i.id = coalesce(
-				c.data->'fields'->'disk_image'->'locked'->>'id',
-				c.data->'fields'->'disk_image'->'editable'->'default_value'->>'id'
-			)
-			where c.deletion_timestamp = 'epoch'
-			  and c.data->'template'->>'id' = $1
-			  and c.data->'fields'->'instance_type' is null
-			  and not (coalesce(i.data->'spec'->'architecture', '[]'::jsonb) ? $2)
-		)
-	`, templateID, "ARCHITECTURE_"+strings.ToUpper(architecture)).Scan(&conflicts)
 	return
 }

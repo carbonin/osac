@@ -30,6 +30,7 @@ import (
 
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
 	"github.com/osac-project/osac/fulfillment-service/internal/database"
+	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
 	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
@@ -226,37 +227,7 @@ func (s *PrivateDiskImagesServer) validateArchitectureUpdate(ctx context.Context
 		return err
 	}
 	defer tx.ReportError(&err)
-	// Check all tenants, including dependents the shared-image owner cannot list.
-	// Returning only a boolean avoids exposing those resource identities. Catalogs
-	// use their locked/default type, or the template type when no policy overrides it.
-	var inUse bool
-	err = tx.QueryRow(ctx, `
-		select exists (
-			select 1
-			from bare_metal_instances i
-			join bare_metal_instance_types t on t.id = i.data->'spec'->'instance_type'->>'id'
-			where i.deletion_timestamp = 'epoch'
-			  and i.data->'spec'->'disk_image'->>'id' = $1
-			  and t.data->'spec'->'hardware'->'cpu'->>'architecture' = any($2::text[])
-		) or exists (
-			select 1
-			from bare_metal_instance_catalog_items c
-			left join bare_metal_instance_templates template on template.id = c.data->'template'->>'id'
-			join bare_metal_instance_types t on t.id = case
-				when c.data->'fields'->'instance_type' is not null then coalesce(
-					c.data->'fields'->'instance_type'->'locked'->>'id',
-					c.data->'fields'->'instance_type'->'editable'->'default_value'->>'id'
-				)
-				else template.data->'instance_type'->>'id'
-			end
-			where c.deletion_timestamp = 'epoch'
-			  and coalesce(
-				c.data->'fields'->'disk_image'->'locked'->>'id',
-				c.data->'fields'->'disk_image'->'editable'->'default_value'->>'id'
-			  ) = $1
-			  and t.data->'spec'->'hardware'->'cpu'->>'architecture' = any($2::text[])
-		)
-	`, current.GetId(), removed).Scan(&inUse)
+	inUse, err := dao.BareMetalReferencesDiskImageArch(ctx, current.GetId(), removed)
 	if err != nil {
 		s.logger.ErrorContext(ctx, "Failed to check disk image architecture dependencies", slog.Any("error", err))
 		return grpcstatus.Error(grpccodes.Internal, "failed to check disk image architecture dependencies")
