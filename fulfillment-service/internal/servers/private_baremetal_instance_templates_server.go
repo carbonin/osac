@@ -173,7 +173,8 @@ func (s *PrivateBareMetalInstanceTemplatesServer) validateArchitectureUpdate(
 	}
 	conflicts, err := dao.BareMetalTemplateArchitectureConflicts(ctx, current.GetId(), instanceType.GetSpec().GetHardware().GetCpu().GetArchitecture())
 	if err != nil {
-		s.logger.ErrorContext(ctx, "Failed to check template architecture dependencies")
+		s.logger.ErrorContext(ctx, "Failed to check template architecture dependencies",
+			slog.String("template", current.GetId()), slog.Any("error", err))
 		return grpcstatus.Error(grpccodes.Internal, "failed to check template architecture dependencies")
 	}
 	if conflicts {
