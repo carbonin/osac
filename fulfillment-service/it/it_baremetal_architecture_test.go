@@ -172,7 +172,7 @@ var _ = Describe("BareMetalInstance architecture admission", Ordered, ContinueOn
 	DescribeTableSubtree("API", func(public bool) {
 		DescribeTable("rejects image changes that invalidate an existing instance", func(ctx context.Context, masked bool) {
 			obj := object()
-			obj.GetSpec().SetUserData("#cloud-config\n")
+			obj.GetSpec().SetUserDataSource(privatev1.UserDataSource_builder{Inline: new("#cloud-config\n")}.Build())
 			created, _, err := create(ctx, obj, public, false)
 			Expect(err).NotTo(HaveOccurred())
 			before, err := images.Get(ctx, privatev1.DiskImagesGetRequest_builder{Id: image.GetId()}.Build())
@@ -193,9 +193,9 @@ var _ = Describe("BareMetalInstance architecture admission", Ordered, ContinueOn
 
 			secret := createCatalogItemUserDataSecretFixture(ctx, usersGroup)
 			change := privatev1.BareMetalInstance_builder{Id: created.GetId(), Spec: privatev1.BareMetalInstanceSpec_builder{
-				UserDataSecret: privatev1.SecretLocalReference_builder{Id: secret}.Build(),
+				UserDataSource: privatev1.UserDataSource_builder{Secret: privatev1.SecretLocalReference_builder{Id: secret}.Build()}.Build(),
 			}.Build()}.Build()
-			secretMask := catalogItemUpdateMask("spec.user_data", "spec.user_data_secret")
+			secretMask := catalogItemUpdateMask("spec.user_data_source")
 			if public {
 				mapped := &publicv1.BareMetalInstance{}
 				Expect(toPublic.Copy(ctx, change, mapped)).To(Succeed())
@@ -205,8 +205,8 @@ var _ = Describe("BareMetalInstance architecture admission", Ordered, ContinueOn
 			}
 			Expect(err).NotTo(HaveOccurred())
 			stored := get(ctx, created.GetId())
-			Expect(stored.GetSpec().HasUserData()).To(BeFalse())
-			Expect(stored.GetSpec().GetUserDataSecret().GetId()).To(Equal(secret))
+			Expect(stored.GetSpec().GetUserDataSource().HasInline()).To(BeFalse())
+			Expect(stored.GetSpec().GetUserDataSource().GetSecret().GetId()).To(Equal(secret))
 			setArchitectures(ctx, architectures["amd64"], architectures["arm64"])
 			setArchitectures(ctx, architectures["amd64"])
 		}, Entry("masked update", true), Entry("full update", false))
