@@ -45,7 +45,8 @@ prerequisites; run it only in a matching environment.
 - **Sanity:** Provision a BareMetalInstance through CLI/catalog with a matching
   multi-architecture DiskImage. Verify that a catalog protects an image
   architecture needed by its InstanceType.
-- **Regression:** Reject mismatched image/type selections through CLI and
+- **Regression:** Provision a compatible direct-template instance through the
+  public API, then reject mismatched image/type selections through CLI and
   public/private APIs without creating an instance or allocating a host.
 
 Architecture cases require an amd64 instance type and matching inventory.

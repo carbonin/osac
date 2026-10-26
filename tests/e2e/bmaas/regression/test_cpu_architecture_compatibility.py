@@ -8,7 +8,14 @@ import pytest
 
 from tests.e2e.bmaas.conftest import BMI_DISK_IMAGE_SOURCE_REF
 from tests.e2e.core.grpc_client import PRIVATE_API, PUBLIC_API, GRPCClient
-from tests.e2e.core.helpers import unique_name, wait_for_bmi_grpc_removal
+from tests.e2e.core.helpers import (
+    assert_bmi_lifecycle_on_running,
+    unique_name,
+    wait_for_bmh_available,
+    wait_for_bmi_deletion,
+    wait_for_bmi_grpc_removal,
+    wait_for_bmi_running,
+)
 from tests.e2e.core.k8s_client import K8sClient
 from tests.e2e.core.osac_cli import OsacCLI
 
@@ -32,6 +39,50 @@ def _instances_by_name(grpc: GRPCClient, name: str) -> list[dict[str, Any]]:
         ).get("items", [])
     except Exception:
         raise RuntimeError("Unable to inspect BareMetalInstances") from None
+
+
+def test_compatible_direct_template_provisions(
+    jwt_grpc_tenant1: GRPCClient,
+    k8s_hub_client: K8sClient,
+    bmi_template: str,
+    bmi_instance_type: str,
+    bmi_disk_image: str,
+    bmh_namespace: str,
+    ssh_public_key: str,
+) -> None:
+    response = jwt_grpc_tenant1.call(
+        service=f"{PUBLIC_API}.BareMetalInstances/Create",
+        data={
+            "object": {
+                "metadata": {"name": unique_name("e2e-bmi-direct-template")},
+                "spec": {
+                    "template": {"name": bmi_template, "shared": True},
+                    "instance_type": {"name": bmi_instance_type, "shared": True},
+                    "disk_image": {"name": bmi_disk_image, "shared": True},
+                    "ssh_public_key": ssh_public_key,
+                    "run_strategy": "BARE_METAL_INSTANCE_RUN_STRATEGY_ALWAYS",
+                },
+            }
+        },
+    )
+    bmi_id = response["object"]["id"]
+    bmi_cr_name = bmh_name = ""
+    try:
+        wait_for_bmi_running(grpc=jwt_grpc_tenant1, bmi_id=bmi_id)
+        spec = jwt_grpc_tenant1.get_baremetal_instance(bmi_id=bmi_id)["object"]["spec"]
+        assert spec.get("instance_type", spec.get("instanceType", {})).get("name") == bmi_instance_type
+        bmi_cr_name, bmh_name = assert_bmi_lifecycle_on_running(
+            grpc=jwt_grpc_tenant1, k8s=k8s_hub_client, bmi_id=bmi_id, bmh_namespace=bmh_namespace, power_cycle=False
+        )
+        assert k8s_hub_client.get_bmh_image_url(name=bmh_name, bmh_namespace=bmh_namespace) == BMI_DISK_IMAGE_SOURCE_REF
+    finally:
+        bmi_cr_name = bmi_cr_name or k8s_hub_client.get_baremetal_instance_name(uuid=bmi_id, checked=False)
+        jwt_grpc_tenant1.delete_baremetal_instance(bmi_id=bmi_id)
+        if bmi_cr_name:
+            wait_for_bmi_deletion(k8s=k8s_hub_client, name=bmi_cr_name)
+        wait_for_bmi_grpc_removal(grpc=jwt_grpc_tenant1, uuid=bmi_id)
+        if bmh_name:
+            wait_for_bmh_available(k8s=k8s_hub_client, name=bmh_name, bmh_namespace=bmh_namespace)
 
 
 @pytest.mark.parametrize("request_path", ["cli", "public", "private"])
